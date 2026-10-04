@@ -7,7 +7,7 @@ import streamlit as st
 import yfinance as yf
 
 # ============================================================
-# INTRADAY PULSE — 30-MINUTE DAILY GATEKEEPER EDITION
+# INTRADAY PULSE — 30-MINUTE DAILY GATEKEEPER EDITION (Updated Rule A)
 # ============================================================
 
 st.set_page_config(page_title="Intraday Pulse", page_icon="⚡", layout="wide",
@@ -145,7 +145,7 @@ def download_nifty(days):
     raise RuntimeError("Could not download NIFTY (^NSEI) data.")
 
 # ============================================================
-# INDICATORS & DAILY GATEKEEPER FILTER
+# INDICATORS & DAILY GATEKEEPER FILTER (Updated Rule A)
 # ============================================================
 
 def calculate_indicators(raw):
@@ -201,15 +201,19 @@ def calculate_indicators(raw):
     ref5 = g["Close"].shift(5).fillna(df["DayOpen"])
     df["Return5"] = (df["Close"] / ref5 - 1) * 100
 
-    # --- DAILY GATEKEEPER FILTER (Yesterday's Check) ---
+    # --- DAILY GATEKEEPER FILTER (Updated Rules) ---
     daily_df = g.agg({"Open": "first", "High": "max", "Low": "min", "Close": "last"}).dropna()
-    daily_df["YesterdayGreen"] = daily_df["Close"] > daily_df["Open"]
-    daily_df["YesterdayHigherHigh"] = daily_df["High"] > daily_df["High"].shift(1)
-    # The condition must be met by YESTERDAY's daily candle for TODAY to be allowed
-    daily_df["AllowedToday"] = daily_df["YesterdayGreen"] | daily_df["YesterdayHigherHigh"]
-    # Shift by 1 so today's date inherits yesterday's evaluation
-    daily_df["AllowedToday"] = daily_df["AllowedToday"].shift(1).fillna(False)
+    
+    # Rule A: Yesterday's Close > Day-Before-Yesterday's High
+    yesterday_close = daily_df["Close"].shift(1)
+    day_before_yesterday_high = daily_df["High"].shift(2)
+    rule_a = yesterday_close > day_before_yesterday_high
 
+    # Rule B: Yesterday's High > Day-Before-Yesterday's High (breaking yesterday's high)
+    yesterday_high = daily_df["High"].shift(1)
+    rule_b = yesterday_high > day_before_yesterday_high
+
+    daily_df["AllowedToday"] = (rule_a | rule_b).shift(1).fillna(False)
     df["DailyAllowed"] = df["Date"].map(daily_df["AllowedToday"].to_dict()).fillna(False)
     return df
 
@@ -533,7 +537,7 @@ def split_stats(trades):
 # ============================================================
 
 st.markdown("# ⚡ Intraday Pulse")
-st.caption("30-Minute Interval + Daily Gatekeeper Edition (Yesterday Green or Higher High).")
+st.caption("30-Minute Interval + Daily Gatekeeper Edition (Rule A: Yesterday Close > Day Before High).")
 
 scan_tab, backtest_tab = st.tabs(["🚀 Live Scanner", "📈 Backtest"])
 
