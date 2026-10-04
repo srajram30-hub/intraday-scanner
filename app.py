@@ -6,28 +6,28 @@ from datetime import datetime
 import time
 
 # ============================================================
-# INTRADAY PULSE — CLASSIC TECHNICAL EDITION
+# INTRADAY PULSE V5 — QUANTITATIVE MASTERCLASS EDITION
 # ============================================================
 
 st.set_page_config(
-    page_title="Intraday Pulse",
+    page_title="Intraday Pulse V5",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
 
 # ============================================================
-# CORE CLASSIC PARAMETERS (No Curve-Fitting)
+# MASTER PARAMETERS
 # ============================================================
 
 MIN_SCORE = 60
 STRONG_SCORE = 75
-RVOL_THRESHOLD = 1.35     # Classic volume expansion filter
-BREAKOUT_BUFFER = 0.0015  # 0.15% resistance clear buffer
-MAX_EXTENSION = 2.5       # Reasonable extension guardrail
-DATA_DAYS = 60
-HOLDING_BARS = 8
-TARGET_R = 1.5            # Realistic intraday target
+RVOL_THRESHOLD = 1.35
+BREAKOUT_BUFFER = 0.0015  # 0.15%
+MAX_EXTENSION = 2.5
+DATA_DAYS = 59            # Safely within Yahoo 15m limit
+HOLDING_BARS = 6          # Max intraday holding bars (~1.5 hours)
+TARGET_R = 1.5
 BACKTEST_SCORE = 75
 ENTRY_BUFFER = 0.001
 MIN_BARS_BETWEEN_TRADES = 5
@@ -68,7 +68,7 @@ MASTER_WATCHLIST = [
 ]
 
 # ============================================================
-# DATA DOWNLOAD
+# DATA DOWNLOAD (Using auto_adjust=True & NIFTYBEES Proxy)
 # ============================================================
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -84,7 +84,7 @@ def download_market_data(tickers, days):
                 chunk,
                 period=f"{days}d",
                 interval="15m",
-                auto_adjust=False,
+                auto_adjust=True,  # Corrects splits automatically
                 progress=False,
                 group_by="ticker",
                 threads=True
@@ -123,13 +123,13 @@ def download_market_data(tickers, days):
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def download_nifty(days):
+def download_nifty_proxy(days):
     try:
         df = yf.download(
-            "^NSEI",
+            "NIFTYBEES.NS",  # Real volume & price proxy for Nifty
             period=f"{days}d",
             interval="15m",
-            auto_adjust=False,
+            auto_adjust=True,
             progress=False
         )
         if isinstance(df.columns, pd.MultiIndex):
@@ -139,7 +139,7 @@ def download_nifty(days):
         return pd.DataFrame()
 
 # ============================================================
-# TECHNICAL INDICATORS & CLASSIC MOMENTUM RULES
+# CAUSAL TECHNICAL INDICATORS (No Look-Ahead Bias)
 # ============================================================
 
 def calculate_indicators(df):
@@ -153,17 +153,14 @@ def calculate_indicators(df):
     if len(df) < 40:
         return pd.DataFrame()
 
-    # Trend Indicator: 20 Exponential Moving Average
     df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
 
-    # Momentum Indicator: 14-period RSI
     delta = df["Close"].diff()
     gain = delta.clip(lower=0).rolling(14).mean()
     loss = (-delta.clip(upper=0)).rolling(14).mean()
     rs = gain / loss.replace(0, np.nan)
     df["RSI"] = 100 - (100 / (1 + rs))
 
-    # Volatility Indicator: 14-period ATR
     prev = df["Close"].shift(1)
     tr = pd.concat([
         df["High"] - df["Low"],
@@ -172,7 +169,6 @@ def calculate_indicators(df):
     ], axis=1).max(axis=1)
     df["ATR"] = tr.rolling(14).mean()
 
-    # Intraday Benchmark: Session VWAP
     df["Date"] = df.index.date
     df["TypicalPrice"] = (df["High"] + df["Low"] + df["Close"]) / 3
     df["TPVolume"] = df["TypicalPrice"] * df["Volume"]
@@ -180,16 +176,12 @@ def calculate_indicators(df):
     df["CumVolume"] = df["Volume"].groupby(df["Date"]).cumsum()
     df["VWAP"] = df["CumTPVolume"] / df["CumVolume"].replace(0, np.nan)
 
-    # Classic Resistance & Breakout Structure
     df["Previous20High"] = df["High"].rolling(20).max().shift(1)
-    df["Breakout"] = (
-        df["Close"] >
-        df["Previous20High"] * (1 + BREAKOUT_BUFFER)
-    )
-    df["FreshBreakout"] = (
-        df["Breakout"] &
-        ~df["Breakout"].shift(1).fillna(False)
-    )
+    
+    # Robust boolean dtypes to avoid object-dtype bugs
+    df["Breakout"] = (df["Close"] > df["Previous20High"] * (1 + BREAKOUT_BUFFER))
+    prev_breakout = df["Breakout"].shift(1, fill_value=False).astype(bool)
+    df["FreshBreakout"] = (df["Breakout"] & ~prev_breakout)
 
     age = 999
     ages = []
@@ -201,14 +193,11 @@ def calculate_indicators(df):
         ages.append(age)
     df["BreakoutAge"] = ages
 
-    # Classic Candle Structure & Persistence Checks
     candle_range = (df["High"] - df["Low"]).replace(0, np.nan)
     body = abs(df["Close"] - df["Open"])
     df["BodyPct"] = body / candle_range
     df["CloseLocation"] = (df["Close"] - df["Low"]) / candle_range
-    df["UpperWickPct"] = (
-        df["High"] - df[["Open", "Close"]].max(axis=1)
-    ) / candle_range
+    df["UpperWickPct"] = (df["High"] - df[["Open", "Close"]].max(axis=1)) / candle_range
 
     df["StrongCandle"] = (
         (df["Close"] > df["Open"]) &
@@ -217,22 +206,27 @@ def calculate_indicators(df):
         (df["UpperWickPct"] <= 0.30)
     )
 
-    # Classic Technical Addition: Consecutive Bullish Momentum (Last 2 bars green)
-    df["IsGreen"] = df["Close"] > df["Open"]
-    df["ConsecutiveGreen"] = df["IsGreen"] & df["IsGreen"].shift(1).fillna(False)
+    df["IsGreen"] = (df["Close"] > df["Open"])
+    prev_green = df["IsGreen"].shift(1, fill_value=False).astype(bool)
+    df["ConsecutiveGreen"] = (df["IsGreen"] & prev_green)
 
-    # Time-of-day Volume Relative Expansion (RVOL)
+    # Causal RVOL Calculation (Strictly Past Days Only)
     df["BarTime"] = df.index.strftime("%H:%M")
-    historical = df.copy()
-    current_date = df["Date"].iloc[-1]
-    historical = historical[historical["Date"] < current_date]
-
-    if len(historical):
-        ref = historical.groupby("BarTime")["Volume"].mean()
-        df["TimeOfDayAvgVolume"] = df["BarTime"].map(ref)
-        df["RVOL"] = df["Volume"] / df["TimeOfDayAvgVolume"]
-    else:
-        df["RVOL"] = df["Volume"] / df["Volume"].rolling(20).mean()
+    rvol_list = []
+    
+    # Compute expanding historical time-of-day mean volume to prevent lookahead bias
+    for idx, row in df.iterrows():
+        b_time = row["BarTime"]
+        b_date = row["Date"]
+        past_bars = df[(df.index < idx) & (df["BarTime"] == b_time) & (df["Date"] < b_date)]
+        if len(past_bars) >= 3:
+            avg_vol = past_bars["Volume"].mean()
+            rvol_val = row["Volume"] / avg_vol if avg_vol > 0 else 1.0
+        else:
+            rvol_val = 1.0
+        rvol_list.append(rvol_val)
+        
+    df["RVOL"] = rvol_list
 
     df["RSIRising"] = df["RSI"] > df["RSI"].shift(1)
     df["Return5"] = (df["Close"] / df["Close"].shift(5) - 1) * 100
@@ -244,57 +238,35 @@ def prepare_nifty(df):
     return calculate_indicators(df) if not df.empty else pd.DataFrame()
 
 
-def relative_strength_at(stock_df, nifty_df, i):
+def get_market_regime(nifty_df, ts):
+    """Exact timestamp matching for NIFTY market regime"""
+    if nifty_df.empty:
+        return 5, "🟡 UNKNOWN"
     try:
-        if i < 5:
-            return 0.0
-        stock_now = stock_df["Close"].iloc[i]
-        stock_prev = stock_df["Close"].iloc[i - 5]
-        stock_ret = (stock_now / stock_prev - 1) * 100
-
-        ts = stock_df.index[i]
-        nifty_slice = nifty_df.loc[:ts]
-        if len(nifty_slice) < 6:
-            return 0.0
-
-        nifty_now = nifty_slice["Close"].iloc[-1]
-        nifty_prev = nifty_slice["Close"].iloc[-6]
-        nifty_ret = (nifty_now / nifty_prev - 1) * 100
-
-        return float(stock_ret - nifty_ret)
-    except Exception:
-        return 0.0
-
-
-def market_regime_at(nifty, i):
-    try:
-        row = nifty.iloc[i]
+        pos = nifty_df.index.searchsorted(ts, side="right") - 1
+        if pos < 0:
+            pos = 0
+        row = nifty_df.iloc[pos]
         score = 0
         if row["Close"] > row["EMA20"]:
             score += 5
         if row["Close"] > row["VWAP"]:
             score += 5
 
-        if score >= 10:
-            regime = "🟢 BULLISH"
-        elif score >= 5:
-            regime = "🟡 NEUTRAL"
-        else:
-            regime = "🔴 BEARISH"
-
+        regime = "🟢 BULLISH" if score >= 10 else "🟡 NEUTRAL" if score >= 5 else "🔴 BEARISH"
         return score, regime
     except Exception:
         return 5, "🟡 UNKNOWN"
 
 
-def score_at(df, nifty, i):
+def score_at(df, nifty_df, i):
     if i < 30:
         return None
 
     row = df.iloc[i]
+    ts = df.index[i]
 
-    vals = ["Close", "EMA20", "VWAP", "RSI", "ATR", "RVOL",
-            "Previous20High", "Return5", "ConsecutiveGreen"]
+    vals = ["Close", "EMA20", "VWAP", "RSI", "ATR", "RVOL", "Previous20High", "Return5", "ConsecutiveGreen"]
     if any(pd.isna(row[v]) for v in vals):
         return None
 
@@ -314,17 +286,29 @@ def score_at(df, nifty, i):
     rsi_rising = bool(row["RSIRising"])
     breakout_age = int(row["BreakoutAge"])
 
-    market_score, market_regime = market_regime_at(
-        nifty,
-        min(i, len(nifty) - 1)
-    )
-    rs = relative_strength_at(df, nifty, i)
+    market_score, market_regime = get_market_regime(nifty_df, ts)
+
+    # Relative Strength calculation using timestamp lookup
+    try:
+        stock_now = price
+        stock_prev = df["Close"].iloc[i - 5]
+        stock_ret = (stock_now / stock_prev - 1) * 100
+
+        nifty_slice = nifty_df.loc[:ts]
+        if len(nifty_slice) >= 6:
+            nifty_now = nifty_slice["Close"].iloc[-1]
+            nifty_prev = nifty_slice["Close"].iloc[-6]
+            nifty_ret = (nifty_now / nifty_prev - 1) * 100
+            rs = float(stock_ret - nifty_ret)
+        else:
+            rs = 0.0
+    except Exception:
+        rs = 0.0
 
     score = 0
     reasons = []
     risks = []
 
-    # Classic Technical Rule 1: Trend Alignment (EMA20 & VWAP)
     if price > ema:
         score += 10
         reasons.append("Above EMA20")
@@ -337,35 +321,24 @@ def score_at(df, nifty, i):
     else:
         risks.append("Below VWAP")
 
-    # Classic Technical Rule 2: Resistance Breakout
     if breakout:
         score += 15
         reasons.append("20-bar breakout")
-
-        distance = (price / prev_high - 1) * 100
-        if distance >= 0.15:
-            score += 3
-            reasons.append("Clean breakout clearance")
-
         if fresh:
             score += 5
             reasons.append("Fresh breakout")
     else:
         risks.append("No breakout")
 
-    # Classic Technical Rule 3: Volume Confirmation (RVOL)
     if rvol >= RVOL_THRESHOLD:
         score += 15
-        reasons.append(f"Volume expansion {rvol:.1f}x")
+        reasons.append(f"Causal RVOL {rvol:.1f}x")
     else:
-        risks.append(f"Normal/Low volume {rvol:.1f}x")
+        risks.append(f"Low RVOL {rvol:.1f}x")
 
-    # Classic Technical Rule 4: Momentum & Persistence (RSI + Consecutive Green Bars)
     if 50 <= rsi <= 75:
         score += 8
         reasons.append(f"Healthy RSI {rsi:.1f}")
-    else:
-        risks.append(f"RSI level {rsi:.1f}")
 
     if rsi_rising:
         score += 4
@@ -373,25 +346,19 @@ def score_at(df, nifty, i):
 
     if consecutive_green:
         score += 5
-        reasons.append("Consecutive green candles (persistence)")
-    else:
-        risks.append("Single-bar move")
+        reasons.append("Consecutive green persistence")
 
     if strong_candle:
         score += 3
-        reasons.append("Strong closing range")
+        reasons.append("Strong candle close")
 
-    # Classic Technical Rule 5: Relative Strength vs Index
     if rs >= 0.5:
         score += 10
-        reasons.append("Positive RS vs NIFTY")
-    else:
-        risks.append("Weak RS vs NIFTY")
+        reasons.append("Positive RS vs Nifty")
 
-    # Market Regime Factor
     if market_score >= 5:
         score += 5
-        reasons.append("Supportive market context")
+        reasons.append("Supportive market regime")
 
     return {
         "score": int(min(max(score, 0), 100)),
@@ -435,11 +402,11 @@ def trade_levels(df, i, price, atr):
     return float(stop), float(target), float(risk)
 
 
-def run_live_scan(stock_data, nifty):
-    nifty_ind = prepare_nifty(nifty)
+def run_live_scan(stock_data, nifty_raw):
+    nifty_ind = prepare_nifty(nifty_raw)
     market_info = {"score": 5, "regime": "🟡 UNKNOWN"}
     if not nifty_ind.empty:
-        ms, mr = market_regime_at(nifty_ind, len(nifty_ind) - 1)
+        ms, mr = get_market_regime(nifty_ind, nifty_ind.index[-1])
         market_info = {"score": ms, "regime": mr}
 
     results = []
@@ -448,7 +415,11 @@ def run_live_scan(stock_data, nifty):
         if df.empty or nifty_ind.empty:
             continue
 
-        i = len(df) - 1
+        # Drop incomplete live forming candle if needed, evaluate last closed bar (-2) or current if closed
+        i = len(df) - 2 if df.index[-1].time() < datetime.strptime("15:30", "%H:%M").time() else len(df) - 1
+        if i < 30:
+            continue
+
         s = score_at(df, nifty_ind, i)
         if s is None:
             continue
@@ -496,7 +467,7 @@ def run_live_scan(stock_data, nifty):
     return out, market_info
 
 # ============================================================
-# BACKTEST ENGINE
+# MASTERCLASS BACKTEST ENGINE (Buy-Stop Fills + Session Square-off)
 # ============================================================
 
 def backtest_stock(ticker, raw_df, nifty_raw):
@@ -525,11 +496,20 @@ def backtest_stock(ticker, raw_df, nifty_raw):
 
         entry_index = i + 1
         entry_time = df.index[entry_index]
-        entry = float(df["Open"].iloc[entry_index])
+        
+        # Enforce intraday session boundary (Do not cross date boundary)
+        if df.index[i].date() != df.index[entry_index].date():
+            continue
 
-        if ENTRY_BUFFER > 0:
-            entry = max(entry, signal["price"] * (1 + ENTRY_BUFFER))
+        # Buy-Stop Fill Verification
+        desired_entry = float(signal["price"] * (1 + ENTRY_BUFFER))
+        next_bar_high = float(df["High"].iloc[entry_index])
+        next_bar_open = float(df["Open"].iloc[entry_index])
 
+        if next_bar_high < desired_entry:
+            continue  # Order never triggered / filled
+
+        entry = max(next_bar_open, desired_entry)
         stop, target, risk = trade_levels(df, i, entry, signal["atr"])
 
         exit_price = None
@@ -537,21 +517,24 @@ def backtest_stock(ticker, raw_df, nifty_raw):
         exit_reason = None
         bars_held = 0
 
-        end = min(entry_index + HOLDING_BARS, len(df) - 1)
+        # Restrict holding period strictly within the same session date
+        current_date = df.index[i].date()
+        end = entry_index
+        while end < len(df) and end <= entry_index + HOLDING_BARS and df.index[end].date() == current_date:
+            end += 1
+        end -= 1
+
+        if end < entry_index:
+            continue
 
         for j in range(entry_index, end + 1):
             high = float(df["High"].iloc[j])
             low = float(df["Low"].iloc[j])
+            bar_open = float(df["Open"].iloc[j])
 
-            if low <= stop and high >= target:
-                exit_price = stop
-                exit_reason = "STOP_AND_TARGET_SAME_BAR"
-                exit_time = df.index[j]
-                bars_held = j - entry_index + 1
-                break
-
+            # Optimistic stop handling & Gap check
             if low <= stop:
-                exit_price = stop
+                exit_price = min(stop, bar_open)  # Gap down protection
                 exit_reason = "STOP"
                 exit_time = df.index[j]
                 bars_held = j - entry_index + 1
@@ -569,17 +552,12 @@ def backtest_stock(ticker, raw_df, nifty_raw):
             exit_price = float(df["Close"].iloc[j])
             exit_time = df.index[j]
             bars_held = j - entry_index + 1
-            exit_reason = "TIME_EXIT"
+            exit_reason = "SESSION_SQUARE_OFF"
 
         pnl = exit_price - entry
         r_multiple = pnl / risk if risk > 0 else 0
 
-        if r_multiple > 0:
-            outcome = "WIN"
-        elif r_multiple < 0:
-            outcome = "LOSS"
-        else:
-            outcome = "BREAKEVEN"
+        outcome = "WIN" if r_multiple > 0 else "LOSS" if r_multiple < 0 else "BREAKEVEN"
 
         trades.append({
             "Stock": ticker.replace(".NS", ""),
@@ -598,8 +576,7 @@ def backtest_stock(ticker, raw_df, nifty_raw):
             "Bars Held": bars_held,
             "RSI": round(signal["rsi"], 1),
             "RVOL": round(signal["rvol"], 2),
-            "RS vs NIFTY": round(signal["rs"], 2),
-            "5-Bar Move %": round(signal["extension"], 2),
+            "RS vs Nifty": round(signal["rs"], 2),
             "Market": signal["market_regime"]
         })
 
@@ -611,7 +588,7 @@ def backtest_stock(ticker, raw_df, nifty_raw):
 @st.cache_data(ttl=300, show_spinner=False)
 def run_full_backtest(tickers, days):
     stock_data, download_errors = download_market_data(tickers, days)
-    nifty = download_nifty(days)
+    nifty = download_nifty_proxy(days)
 
     all_trades = []
     errors = list(download_errors)
@@ -647,7 +624,8 @@ def calculate_backtest_stats(trades):
     avg_win = trades.loc[trades["R"] > 0, "R"].mean() if wins else 0
     avg_loss = trades.loc[trades["R"] < 0, "R"].mean() if losses else 0
 
-    cumulative_r = trades["R"].cumsum()
+    # Prepend 0 to properly track starting drawdown from 0
+    cumulative_r = pd.concat([pd.Series([0.0]), trades["R"].cumsum()]).reset_index(drop=True)
     peak = cumulative_r.cummax()
     drawdown = cumulative_r - peak
     max_drawdown = abs(drawdown.min())
@@ -670,8 +648,8 @@ def calculate_backtest_stats(trades):
 # UI INTERFACE
 # ============================================================
 
-st.markdown("# ⚡ Intraday Pulse")
-st.markdown("Classic Technical Breakout & Momentum Command Center")
+st.markdown("# ⚡ Intraday Pulse V5")
+st.markdown("Quantitative Masterclass — Causal Indicators & Strict Session Execution")
 
 scan_tab, backtest_tab = st.tabs(["🚀 Live Scanner", "📈 Backtest"])
 
@@ -680,10 +658,10 @@ scan_tab, backtest_tab = st.tabs(["🚀 Live Scanner", "📈 Backtest"])
 # ============================================================
 
 with scan_tab:
-    if st.button("🚀 Run Instant Market Scan", use_container_width=True, type="primary"):
-        with st.spinner(f"Scanning {len(MASTER_WATCHLIST)} stocks with classic technical rules..."):
+    if st.button("🚀 Run Masterclass Scan", use_container_width=True, type="primary"):
+        with st.spinner(f"Scanning {len(MASTER_WATCHLIST)} stocks with causal filters..."):
             stock_data, errors = download_market_data(tuple(MASTER_WATCHLIST), DATA_DAYS)
-            nifty = download_nifty(DATA_DAYS)
+            nifty = download_nifty_proxy(DATA_DAYS)
             results, market_info = run_live_scan(stock_data, nifty)
 
         st.session_state["live_results"] = results
@@ -691,7 +669,7 @@ with scan_tab:
         st.session_state["scan_time"] = datetime.now()
 
     if "live_results" not in st.session_state:
-        st.info(f"Tap **Run Instant Market Scan** above to analyze your {len(MASTER_WATCHLIST)}-stock universe.")
+        st.info(f"Tap **Run Masterclass Scan** above to scan your {len(MASTER_WATCHLIST)}-stock universe.")
     else:
         results = st.session_state["live_results"]
         market_info = st.session_state["market_info"]
@@ -705,17 +683,17 @@ with scan_tab:
         c4.metric("Breakouts", int((results["Breakout"] == "YES").sum()))
 
         st.markdown("---")
-        st.subheader("📋 Master Stock Information Table (All Scanned Stocks)")
+        st.subheader("📋 Master Stock Information Table")
         
         if results.empty:
-            st.warning("No stocks match the current filter criteria.")
+            st.warning("No stocks match the current criteria.")
         else:
             st.dataframe(results, use_container_width=True, hide_index=True)
 
             st.download_button(
-                "⬇️ Download All Results CSV",
+                "⬇️ Download Scan CSV",
                 results.to_csv(index=False).encode("utf-8"),
-                "intraday_scan_results.csv",
+                "masterclass_scan_results.csv",
                 "text/csv",
                 use_container_width=True
             )
@@ -725,11 +703,11 @@ with scan_tab:
 # ============================================================
 
 with backtest_tab:
-    st.subheader("📈 Historical Strategy Backtest Engine")
-    st.warning("Simulating classic intraday breakout rules with multi-bar momentum and 1.5R targets.")
+    st.subheader("📈 Masterclass Historical Backtest Engine")
+    st.warning("Simulating strict causal rules: timestamp NIFTY alignment, causal expanding RVOL, buy-stop fill verification, and same-session square-off.")
 
-    if st.button("📊 Run Historical Backtest", use_container_width=True, type="primary"):
-        with st.spinner("Running historical event-by-event backtest..."):
+    if st.button("📊 Run Masterclass Backtest", use_container_width=True, type="primary"):
+        with st.spinner("Running rigorous event-by-event backtest..."):
             trades, errors = run_full_backtest(tuple(MASTER_WATCHLIST), DATA_DAYS)
 
         st.session_state["backtest_trades"] = trades
@@ -737,12 +715,12 @@ with backtest_tab:
         st.session_state["backtest_time"] = datetime.now()
 
     if "backtest_trades" not in st.session_state:
-        st.info("Tap **Run Historical Backtest** above to measure performance metrics.")
+        st.info("Tap **Run Masterclass Backtest** above to measure rigorous performance metrics.")
     else:
         trades = st.session_state["backtest_trades"]
 
         if trades.empty:
-            st.error("No historical trades matched the rules.")
+            st.error("No historical trades matched the rigorous audit rules.")
         else:
             stats = calculate_backtest_stats(trades)
 
@@ -760,7 +738,7 @@ with backtest_tab:
             bc4.metric("Max Drawdown", f"{stats['Max Drawdown R']:.2f}R")
 
             st.subheader("📈 Cumulative Equity Curve (R)")
-            equity = trades["R"].cumsum()
+            equity = pd.concat([pd.Series([0.0]), trades["R"].cumsum()]).reset_index(drop=True)
             st.line_chart(pd.DataFrame({"Cumulative R": equity.values}))
 
             st.subheader("📒 Complete Trade Log")
@@ -769,7 +747,7 @@ with backtest_tab:
             st.download_button(
                 "⬇️ Download Trade Log CSV",
                 trades.to_csv(index=False).encode("utf-8"),
-                "backtest_trade_log.csv",
+                "masterclass_backtest_trade_log.csv",
                 "text/csv",
                 use_container_width=True
             )
