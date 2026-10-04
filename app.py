@@ -7,7 +7,7 @@ import streamlit as st
 import yfinance as yf
 
 # ============================================================
-# INTRADAY PULSE — v6 (Pullback-to-Value & Trend Resumption Edition)
+# INTRADAY PULSE — v7 (Reduced Target Edition - Target R = 1.0)
 # ============================================================
 
 st.set_page_config(page_title="Intraday Pulse", page_icon="⚡", layout="wide",
@@ -22,14 +22,14 @@ def _ver(v):
 
 STRETCH = {"width": "stretch"} if _ver(st.__version__) >= (1, 50) else {"use_container_width": True}
 
-# ---------------- Parameters (Optimized for Pullback Trading) ----------------
+# ---------------- Parameters (Reduced Target for Higher Win Rate) ----------------
 MIN_SCORE = 65
 STRONG_SCORE = 80
-RVOL_THRESHOLD = 1.20          # Moderate volume required on resumption
+RVOL_THRESHOLD = 1.20
 MAX_EXTENSION = 3.0
 DATA_DAYS = 59
 HOLDING_BARS = 8
-TARGET_R = 1.8                 # Enhanced reward-to-risk for pullback entries
+TARGET_R = 1.0                 # Reduced target (1.0R) for faster, higher-probability fills
 BACKTEST_SCORE = 80
 ENTRY_BUFFER = 0.0005          # Minimal buffer above pullback resumption trigger
 SKIP_OPEN_BARS = 3             # Wait 45 mins for opening volatility to settle
@@ -176,23 +176,18 @@ def calculate_indicators(raw):
     df["VWAP"] = (tp * df["Volume"]).groupby(df["Date"]).cumsum() / \
         df["Volume"].groupby(df["Date"]).cumsum().replace(0, np.nan)
 
-    # Trend & Pullback Mechanics
     df["InUptrend"] = (df["Close"] > df["EMA20"]) & (df["Close"] > df["VWAP"])
     
-    # Recent breakout structure (made a 20-bar high within the last 15 bars)
     df["Previous20High"] = df["High"].rolling(20).max().shift(1)
     df["RecentBreakout"] = (df["High"].rolling(15).max() > df["Previous20High"])
 
-    # Pullback check: Low touched or came within 0.5% of VWAP or EMA20 within the last 3 bars
     near_vwap = (df["Low"].rolling(3).min() <= df["VWAP"] * 1.005)
     near_ema = (df["Low"].rolling(3).min() <= df["EMA20"] * 1.005)
     df["InPullbackZone"] = near_vwap | near_ema
 
-    # Resumption trigger: Current bar is green and closes above previous bar's high
     df["GreenBar"] = df["Close"] > df["Open"]
     df["ResumptionTrigger"] = df["GreenBar"] & (df["Close"] > df["High"].shift(1))
 
-    # Combined Pullback Entry Signal
     df["PullbackSignal"] = df["InUptrend"] & df["RecentBreakout"] & df["InPullbackZone"] & df["ResumptionTrigger"]
 
     df["BarTime"] = df.index.strftime("%H:%M")
@@ -260,7 +255,6 @@ def build_frame(raw, nifty_ind):
 
 
 def trade_levels(df, i, entry, atr):
-    # Tighter pullback stop-loss: lowest low of the last 3 bars minus a tiny buffer
     swing_low = float(df["Low"].iloc[max(0, i - 2):i + 1].min())
     stop = min(swing_low - 0.1 * atr, entry - 1.0 * atr)
     stop = min(stop, entry * 0.995)
@@ -329,7 +323,7 @@ def run_live_scan(stock_data, nifty_raw):
     return out, market_info, sorted(skipped)
 
 # ============================================================
-# PORTFOLIO BACKTEST (Pullback Execution)
+# PORTFOLIO BACKTEST
 # ============================================================
 
 def collect_signals(ticker, df):
@@ -519,14 +513,14 @@ def split_stats(trades):
 
 
 st.markdown("# ⚡ Intraday Pulse")
-st.caption("Pullback-to-Value Strategy Edition. Research tool only, not investment advice.")
+st.caption("Reduced Target Edition (Target R = 1.0). Research tool only, not investment advice.")
 
 scan_tab, backtest_tab = st.tabs(["🚀 Live Scanner", "📈 Backtest"])
 
 with scan_tab:
     if st.button("🚀 Run Instant Market Scan", type="primary", key="scan", **STRETCH):
         try:
-            with st.spinner(f"Scanning {len(MASTER_WATCHLIST)} stocks for pullbacks..."):
+            with st.spinner(f"Scanning {len(MASTER_WATCHLIST)} stocks for reduced-target setups..."):
                 stock_data, dl_errors = download_market_data(tuple(MASTER_WATCHLIST), DATA_DAYS)
                 nifty = download_nifty(DATA_DAYS)
                 results, market_info, skipped = run_live_scan(stock_data, nifty)
@@ -537,44 +531,44 @@ with scan_tab:
             st.error(f"Scan failed: {e}")
 
     if "live_results" not in st.session_state:
-        st.info("Tap **Run Instant Market Scan** to scan for pullback setups.")
+        st.info("Tap **Run Instant Market Scan** to scan for setups.")
     else:
         results, mi = st.session_state["live_results"], st.session_state["market_info"]
         st.markdown(f"### Market Regime: {mi['regime']}")
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Watchlist", len(MASTER_WATCHLIST))
         c2.metric("Analysed", len(results))
-        c3.metric("Pullback Setups", int((results["Status"] == "🟢 ENTER PULLBACK").sum()) if len(results) else 0)
-        c4.metric("Active Watch", int((results["Status"] == "🟡 WATCH PULLBACK").sum()) if len(results) else 0)
+        c3.metric("Setups", int((results["Status"] == "🟢 ENTER PULLBACK").sum()) if len(results) else 0)
+        c4.metric("Watch", int((results["Status"] == "🟡 WATCH PULLBACK").sum()) if len(results) else 0)
 
         if results.empty:
-            st.warning("No pullback setups found matching current value criteria.")
+            st.warning("No setups found matching criteria.")
         else:
             st.dataframe(results, hide_index=True, **STRETCH)
             st.download_button("⬇️ Download Results CSV", results.to_csv(index=False).encode("utf-8"),
-                               "pullback_scan_results.csv", "text/csv", **STRETCH)
+                               "reduced_target_scan.csv", "text/csv", **STRETCH)
 
 with backtest_tab:
-    st.subheader("📈 Pullback Strategy Backtest")
+    st.subheader("📈 Reduced Target Strategy Backtest")
     st.warning(
         f"Net of costs ({COST_ROUND_TRIP_PCT}% round trip + {SLIPPAGE_PCT}% slippage per side). "
         f"Max {MAX_CONCURRENT_POSITIONS} concurrent positions, {RISK_PER_TRADE_PCT}% capital risked per trade, "
-        f"Target R: {TARGET_R}. Pullback-to-VWAP/EMA20 execution model active.")
+        f"Target R: {TARGET_R} (1:1 risk-to-reward).")
 
-    if st.button("📊 Run Pullback Backtest", type="primary", key="bt", **STRETCH):
+    if st.button("📊 Run Backtest", type="primary", key="bt", **STRETCH):
         try:
-            with st.spinner("Running pullback portfolio simulation..."):
+            with st.spinner("Running portfolio simulation with 1.0R target..."):
                 trades, errors, skipped = run_full_backtest(tuple(MASTER_WATCHLIST), DATA_DAYS)
             st.session_state.update(backtest_trades=trades, bt_errors=errors, bt_skipped=skipped)
         except Exception as e:
             st.error(f"Backtest failed: {e}")
 
     if "backtest_trades" not in st.session_state:
-        st.info("Tap **Run Pullback Backtest** to measure performance.")
+        st.info("Tap **Run Backtest** to measure performance.")
     else:
         trades = st.session_state["backtest_trades"]
         if trades.empty:
-            st.error("No historical trades matched the pullback rules.")
+            st.error("No historical trades matched the rules.")
         else:
             s = calculate_backtest_stats(trades)
             m = st.columns(4)
@@ -598,4 +592,4 @@ with backtest_tab:
             st.subheader("📒 Trade Log")
             st.dataframe(trades, hide_index=True, **STRETCH)
             st.download_button("⬇️ Download Trade Log CSV", trades.to_csv(index=False).encode("utf-8"),
-                               "pullback_backtest_trade_log.csv", "text/csv", **STRETCH)
+                               "reduced_target_backtest_log.csv", "text/csv", **STRETCH)
