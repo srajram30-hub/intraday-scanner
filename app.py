@@ -6,7 +6,7 @@ import numpy as np
 st.set_page_config(page_title="Nifty 100 Intraday Scanner", layout="wide")
 
 st.title("⚡ Nifty 100 Intraday Institutional Scanner")
-st.markdown("Automated second-opinion engine with **Built-in Risk Management (Stop-Loss & Targets)**.")
+st.markdown("Automated 4-Pillar & Institutional Engine with Built-in Risk Management (Stop-Loss & Targets).")
 
 nifty_100_watchlist = [
     "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS", 
@@ -33,6 +33,7 @@ def scan_nifty_market(tickers):
             if df.empty or len(df) < 25:
                 continue
                 
+            # Technical Indicators Setup
             df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
             df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
             
@@ -46,7 +47,7 @@ def scan_nifty_market(tickers):
             # VWAP
             df['VWAP'] = (df['Volume'] * (df['High'] + df['Low'] + df['Close']) / 3).cumsum() / df['Volume'].cumsum()
             
-            # ATR (14) for Risk Management
+            # ATR (14)
             high_low = df['High'] - df['Low']
             high_close = np.abs(df['High'] - df['Close'].shift())
             low_close = np.abs(df['Low'] - df['Close'].shift())
@@ -59,19 +60,33 @@ def scan_nifty_market(tickers):
             prev_close = df['Close'].iloc[-2]
             change_pct = ((current_price - prev_close) / prev_close) * 100
             
-            is_uptrend = (current_price > latest['EMA_20']) and (current_price > latest['VWAP'])
-            is_high_volume = latest['Volume'] > (latest['Vol_MA20'] * 1.3)
-            is_healthy_rsi = 50 <= latest['RSI'] <= 75
+            # --- THE 4 PILLARS & INSTITUTIONAL FILTERS ---
+            # 1. Candlestick Anatomy: Strong Bullish Body
+            candle_body = abs(latest['Close'] - latest['Open'])
+            candle_range = latest['High'] - latest['Low']
+            is_strong_candle = (latest['Close'] > latest['Open']) and (candle_range > 0 and (candle_body / candle_range) > 0.4)
             
+            # 2. Support / Resistance Breakout: Breaking 20-period highs
             recent_high = df['High'].iloc[-21:-1].max()
             is_breakout = current_price >= recent_high
             
-            # Risk Management Levels calculated automatically
+            # 3. Market Trend: Price above 20 EMA and VWAP
+            is_uptrend = (current_price > latest['EMA_20']) and (current_price > latest['VWAP'])
+            
+            # 4. Volume Confirmation: RVOL > 1.3x spike
+            rvol = latest['Volume'] / latest['Vol_MA20'] if latest['Vol_MA20'] > 0 else 0
+            is_high_volume = rvol > 1.3
+            
+            # Additional Health Filter (RSI)
+            is_healthy_rsi = 50 <= latest['RSI'] <= 75
+            
+            # Automated Risk Management Levels
             atr_value = latest['ATR'] if not np.isnan(latest['ATR']) else (current_price * 0.005)
             stop_loss = round(current_price - (1.5 * atr_value), 2)
             target_price = round(current_price + (2.5 * atr_value), 2)
             
-            if is_uptrend and is_high_volume and is_healthy_rsi and is_breakout:
+            # Decision Engine Logic
+            if is_strong_candle and is_breakout and is_uptrend and is_high_volume and is_healthy_rsi:
                 decision = "🟢 YES, GO AHEAD"
             elif not is_high_volume or not is_uptrend:
                 decision = "🟡 TEMPORARY HOLD"
@@ -82,7 +97,7 @@ def scan_nifty_market(tickers):
                 "Stock": ticker.replace(".NS", ""),
                 "Price (₹)": round(current_price, 2),
                 "Change %": round(change_pct, 2),
-                "RVOL": round(latest['Volume'] / latest['Vol_MA20'], 2) if latest['Vol_MA20'] > 0 else 0,
+                "RVOL": round(rvol, 2),
                 "RSI": round(latest['RSI'], 1),
                 "Stop-Loss (₹)": stop_loss,
                 "Target (₹)": target_price,
@@ -93,7 +108,7 @@ def scan_nifty_market(tickers):
     return pd.DataFrame(results)
 
 if st.button("🚀 Run Nifty 100 Instant Scan"):
-    with st.spinner("Scanning market & calculating automated Risk Management levels..."):
+    with st.spinner("Evaluating 4-Pillar technicals and institutional indicators..."):
         df_results = scan_nifty_market(nifty_100_watchlist)
         
         if not df_results.empty:
@@ -102,4 +117,4 @@ if st.button("🚀 Run Nifty 100 Instant Scan"):
         else:
             st.error("Could not fetch market data right now. Please try again.")
 else:
-    st.info("Click the **'Run Nifty 100 Instant Scan'** button above to evaluate trades with automated Stop-Loss and Target levels.")
+    st.info("Click the **'Run Nifty 100 Instant Scan'** button above to evaluate your watchlist instantly on mobile or desktop.")
