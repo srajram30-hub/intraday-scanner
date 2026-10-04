@@ -7,7 +7,7 @@ import streamlit as st
 import yfinance as yf
 
 # ============================================================
-# INTRADAY PULSE — 1-HOUR + DAILY GATEKEEPER EDITION
+# INTRADAY PULSE — 1-HOUR + DAILY GATEKEEPER EDITION (Holding Bars = 4)
 # ============================================================
 
 st.set_page_config(page_title="Intraday Pulse", page_icon="⚡", layout="wide",
@@ -22,14 +22,14 @@ def _ver(v):
 
 STRETCH = {"width": "stretch"} if _ver(st.__version__) >= (1, 50) else {"use_container_width": True}
 
-# ---------------- Parameters (1-Hour Interval) ----------------
+# ---------------- Parameters (1-Hour Interval, Holding = 4 Bars) ----------------
 MIN_SCORE = 65
 STRONG_SCORE = 80
 RVOL_THRESHOLD = 1.35
 BREAKOUT_BUFFER = 0.0015
 MAX_EXTENSION = 2.5
 DATA_DAYS = 59
-HOLDING_BARS = 6               # 6 hourly bars = roughly 1 trading day
+HOLDING_BARS = 4               # Reduced from 6 to 4 hourly bars for faster exits
 TARGET_R = 1.5
 BACKTEST_SCORE = 80
 ENTRY_BUFFER = 0.001
@@ -537,7 +537,7 @@ def split_stats(trades):
 # ============================================================
 
 st.markdown("# ⚡ Intraday Pulse")
-st.caption("1-Hour Interval + Daily Gatekeeper Edition (Rule A: Yesterday Close > Day Before High | Rule B: Yesterday High > Day Before High).")
+st.caption("1-Hour Interval + Daily Gatekeeper Edition (Holding Bars = 4).")
 
 scan_tab, backtest_tab = st.tabs(["🚀 Live Scanner", "📈 Backtest"])
 
@@ -576,7 +576,7 @@ with scan_tab:
 
 with backtest_tab:
     st.subheader("📈 1-Hour Strategy Backtest")
-    st.warning("Net of costs. 1-hour interval with the Daily Gatekeeper pre-filter enabled.")
+    st.warning("Net of costs. 1-hour interval with 4-bar holding period and Daily Gatekeeper pre-filter.")
 
     if st.button("📊 Run Historical Backtest", type="primary", key="bt", **STRETCH):
         try:
