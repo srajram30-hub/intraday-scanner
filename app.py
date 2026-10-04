@@ -4,6 +4,7 @@ import yfinance as yf
 import numpy as np
 from datetime import datetime
 import time
+import textwrap
 
 # ============================================================
 # INTRADAY PULSE V4
@@ -217,17 +218,14 @@ def calculate_indicators(df):
     if len(df) < 40:
         return pd.DataFrame()
 
-    # EMA
     df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
 
-    # RSI
     delta = df["Close"].diff()
     gain = delta.clip(lower=0).rolling(14).mean()
     loss = (-delta.clip(upper=0)).rolling(14).mean()
     rs = gain / loss.replace(0, np.nan)
     df["RSI"] = 100 - (100 / (1 + rs))
 
-    # ATR
     prev = df["Close"].shift(1)
     tr = pd.concat([
         df["High"] - df["Low"],
@@ -236,7 +234,6 @@ def calculate_indicators(df):
     ], axis=1).max(axis=1)
     df["ATR"] = tr.rolling(14).mean()
 
-    # Session VWAP
     df["Date"] = df.index.date
     df["TypicalPrice"] = (df["High"] + df["Low"] + df["Close"]) / 3
     df["TPVolume"] = df["TypicalPrice"] * df["Volume"]
@@ -244,7 +241,6 @@ def calculate_indicators(df):
     df["CumVolume"] = df["Volume"].groupby(df["Date"]).cumsum()
     df["VWAP"] = df["CumTPVolume"] / df["CumVolume"].replace(0, np.nan)
 
-    # 20-bar resistance
     df["Previous20High"] = df["High"].rolling(20).max().shift(1)
     df["Breakout"] = (
         df["Close"] >
@@ -255,7 +251,6 @@ def calculate_indicators(df):
         ~df["Breakout"].shift(1).fillna(False)
     )
 
-    # Breakout age without future leakage
     age = 999
     ages = []
     for fresh in df["FreshBreakout"].fillna(False):
@@ -266,7 +261,6 @@ def calculate_indicators(df):
         ages.append(age)
     df["BreakoutAge"] = ages
 
-    # Candle structure
     candle_range = (df["High"] - df["Low"]).replace(0, np.nan)
     body = abs(df["Close"] - df["Open"])
     df["BodyPct"] = body / candle_range
@@ -282,7 +276,6 @@ def calculate_indicators(df):
         (df["UpperWickPct"] <= 0.30)
     )
 
-    # Time-of-day RVOL, calculated only from prior dates
     df["BarTime"] = df.index.strftime("%H:%M")
     historical = df.copy()
     current_date = df["Date"].iloc[-1]
@@ -295,7 +288,6 @@ def calculate_indicators(df):
     else:
         df["RVOL"] = df["Volume"] / df["Volume"].rolling(20).mean()
 
-    # Momentum
     df["RSIRising"] = df["RSI"] > df["RSI"].shift(1)
     df["Return5"] = (df["Close"] / df["Close"].shift(5) - 1) * 100
 
@@ -391,7 +383,6 @@ def score_at(df, nifty, i):
     reasons = []
     risks = []
 
-    # Trend 20
     if price > ema:
         score += 10
         reasons.append("Above EMA20")
@@ -404,7 +395,6 @@ def score_at(df, nifty, i):
     else:
         risks.append("Below VWAP")
 
-    # Breakout 25
     if breakout:
         score += 15
         reasons.append("20-bar breakout")
@@ -428,7 +418,6 @@ def score_at(df, nifty, i):
     else:
         risks.append("No confirmed breakout")
 
-    # Volume 15
     if rvol >= 2.0:
         score += 15
         reasons.append(f"Exceptional RVOL {rvol:.1f}x")
@@ -441,7 +430,6 @@ def score_at(df, nifty, i):
     else:
         risks.append(f"Low RVOL {rvol:.1f}x")
 
-    # Momentum 15
     if 55 <= rsi <= 70:
         score += 8
         reasons.append(f"Healthy RSI {rsi:.1f}")
@@ -469,7 +457,6 @@ def score_at(df, nifty, i):
     else:
         risks.append("Weak candle")
 
-    # Relative strength 10
     if rs >= 1.5:
         score += 10
         reasons.append("Strong RS vs NIFTY")
@@ -482,7 +469,6 @@ def score_at(df, nifty, i):
     else:
         risks.append("Weak RS vs NIFTY")
 
-    # Market 10
     if market_score >= 10:
         score += 10
         reasons.append("Bullish NIFTY")
@@ -492,7 +478,6 @@ def score_at(df, nifty, i):
     else:
         risks.append("Bearish NIFTY")
 
-    # Extension/risk 5
     if extension <= 1.5:
         score += 5
         reasons.append("Not extended")
@@ -541,7 +526,6 @@ def trade_levels(df, i, price, atr, target_r):
     atr_stop = price - 1.5 * atr
     stop = max(structure_stop, atr_stop)
 
-    # Keep stop below entry
     stop = min(stop, price * 0.995)
 
     risk = price - stop
@@ -763,10 +747,6 @@ def backtest_stock(ticker, raw_df, nifty_raw):
 
     return trades
 
-# ============================================================
-# COMPLETE BACKTEST
-# ============================================================
-
 @st.cache_data(ttl=300, show_spinner=False)
 def run_full_backtest(tickers, days):
     stock_data, download_errors = download_market_data(
@@ -796,10 +776,6 @@ def run_full_backtest(tickers, days):
         ).reset_index(drop=True)
 
     return trades_df, sorted(set(errors))
-
-# ============================================================
-# BACKTEST STATISTICS
-# ============================================================
 
 def calculate_backtest_stats(trades):
     if trades.empty:
@@ -921,19 +897,12 @@ with scan_tab:
         results = st.session_state["live_results"]
         market_info = st.session_state["market_info"]
 
-        st.markdown(
-            f"""
-            <div style="
-                padding:15px;border-radius:15px;
-                background:#111820;color:white;margin-bottom:15px;
-            ">
-            <h3 style="margin:0;">
-            Market Regime: {market_info["regime"]}
-            </h3>
+        regime_html = textwrap.dedent(f"""
+            <div style="padding:15px;border-radius:15px;background:#111820;color:white;margin-bottom:15px;">
+            <h3 style="margin:0;">Market Regime: {market_info["regime"]}</h3>
             </div>
-            """,
-            unsafe_allow_html=True
-        )
+        """)
+        st.markdown(regime_html, unsafe_allow_html=True)
 
         display = results[
             results["Score"] >= MIN_SCORE
@@ -976,33 +945,19 @@ with scan_tab:
                 else "negative"
             )
 
-            st.markdown(
-                f"""
+            card_html = textwrap.dedent(f"""
                 <div class="stock-card">
                     <div class="stock-header">
-                        <div class="stock-name">
-                            {row["Stock"]}
-                        </div>
-                        <div class="score {score_class}">
-                            {score}/100
-                        </div>
+                        <div class="stock-name">{row["Stock"]}</div>
+                        <div class="score {score_class}">{score}/100</div>
                     </div>
 
                     <div style="margin-top:12px;">
-                        <span class="price">
-                            ₹{row["Price"]:,.2f}
-                        </span>
-                        <span class="{change_class}"
-                              style="margin-left:15px;">
-                            {row["Change %"]:+.2f}%
-                        </span>
+                        <span class="price">₹{row["Price"]:,.2f}</span>
+                        <span class="{change_class}" style="margin-left:15px;">{row["Change %"]:+.2f}%</span>
                     </div>
 
-                    <div style="
-                        margin-top:10px;
-                        font-size:17px;
-                        font-weight:700;
-                    ">
+                    <div style="margin-top:10px;font-size:17px;font-weight:700;">
                         {row["Verdict"]}
                     </div>
 
@@ -1013,48 +968,36 @@ with scan_tab:
                     <div class="info-row">
                         <div>
                             <div class="label">ENTRY</div>
-                            <div class="value">
-                                ₹{row["Entry"]:,.2f}
-                            </div>
+                            <div class="value">₹{row["Entry"]:,.2f}</div>
                         </div>
                         <div>
                             <div class="label">STOP LOSS</div>
-                            <div class="value">
-                                ₹{row["Stop Loss"]:,.2f}
-                            </div>
+                            <div class="value">₹{row["Stop Loss"]:,.2f}</div>
                         </div>
                         <div>
                             <div class="label">TARGET</div>
-                            <div class="value">
-                                ₹{row["Target"]:,.2f}
-                            </div>
+                            <div class="value">₹{row["Target"]:,.2f}</div>
                         </div>
                     </div>
 
                     <div class="info-row">
                         <div>
                             <div class="label">R:R</div>
-                            <div class="value">
-                                1 : {row["R:R"]:.1f}
-                            </div>
+                            <div class="value">1 : {row["R:R"]:.1f}</div>
                         </div>
                         <div>
                             <div class="label">RVOL</div>
-                            <div class="value">
-                                {row["RVOL"]:.1f}x
-                            </div>
+                            <div class="value">{row["RVOL"]:.1f}x</div>
                         </div>
                         <div>
                             <div class="label">RSI</div>
-                            <div class="value">
-                                {row["RSI"]:.1f}
-                            </div>
+                            <div class="value">{row["RSI"]:.1f}</div>
                         </div>
                     </div>
                 </div>
-                """,
-                unsafe_allow_html=True
-            )
+            """)
+
+            st.markdown(card_html, unsafe_allow_html=True)
 
             with st.expander(
                 f"📊 {row['Stock']} — Details"
