@@ -7,7 +7,7 @@ import streamlit as st
 import yfinance as yf
 
 # ============================================================
-# INTRADAY PULSE — 1-HOUR + DAILY GATEKEEPER EDITION (Holding Bars = 4)
+# INTRADAY PULSE — 30-MIN PRECISION WINDOW EDITION
 # ============================================================
 
 st.set_page_config(page_title="Intraday Pulse", page_icon="⚡", layout="wide",
@@ -22,19 +22,19 @@ def _ver(v):
 
 STRETCH = {"width": "stretch"} if _ver(st.__version__) >= (1, 50) else {"use_container_width": True}
 
-# ---------------- Parameters (1-Hour Interval, Holding = 4 Bars) ----------------
+# ---------------- Parameters (30-Min Interval, 1.5h Hold, 10:00-2:00 Window) ----------------
 MIN_SCORE = 65
 STRONG_SCORE = 80
 RVOL_THRESHOLD = 1.35
 BREAKOUT_BUFFER = 0.0015
 MAX_EXTENSION = 2.5
 DATA_DAYS = 59
-HOLDING_BARS = 1               # Reduced from 6 to 4 hourly bars for faster exits
+HOLDING_BARS = 3               # 3 bars x 30m = 1.5 hours holding time
 TARGET_R = 1.5
 BACKTEST_SCORE = 80
 ENTRY_BUFFER = 0.001
-SKIP_OPEN_BARS = 1             # Skip first hourly bar (9:15 - 10:15 noise)
-LAST_SIGNAL_TIME = "14:15"
+SKIP_OPEN_BARS = 2             # Skip 9:15 & 9:45 bars (entries start after 10:00 AM)
+LAST_SIGNAL_TIME = "14:00"     # No entries after 2:00 PM
 COOLDOWN_BARS = 2
 MIN_DAILY_TURNOVER = 5e7
 SLIPPAGE_PCT = 0.05
@@ -80,7 +80,7 @@ MASTER_WATCHLIST = [
 ]
 
 # ============================================================
-# DATA (1-Hour Interval)
+# DATA (30-Minute Interval)
 # ============================================================
 
 def clean_frame(df):
@@ -89,7 +89,7 @@ def clean_frame(df):
     df = df[~df.index.duplicated(keep="last")].sort_index()
     df.index = df.index.tz_localize(IST) if df.index.tz is None else df.index.tz_convert(IST)
     df = df.dropna(subset=["Close"])
-    if len(df) and df.index[-1] + pd.Timedelta(hours=1) > pd.Timestamp.now(tz=IST):
+    if len(df) and df.index[-1] + pd.Timedelta(minutes=30) > pd.Timestamp.now(tz=IST):
         df = df.iloc[:-1]
     return df
 
@@ -101,7 +101,7 @@ def download_market_data(tickers, days):
     for start in range(0, len(tickers), chunk_size):
         chunk = list(tickers[start:start + chunk_size])
         try:
-            data = yf.download(chunk, period=f"{days}d", interval="60m", auto_adjust=True,
+            data = yf.download(chunk, period=f"{days}d", interval="30m", auto_adjust=True,
                                progress=False, group_by="ticker", threads=True)
             if data.empty:
                 errors.extend(chunk)
@@ -119,7 +119,7 @@ def download_market_data(tickers, days):
                     else:
                         df = data.copy()
                     df = clean_frame(df)
-                    if len(df) >= 30:
+                    if len(df) >= 50:
                         all_data[t] = df
                     else:
                         errors.append(t)
@@ -134,7 +134,7 @@ def download_market_data(tickers, days):
 @st.cache_data(ttl=60, show_spinner=False)
 def download_nifty(days):
     for _ in range(2):
-        df = yf.download("^NSEI", period=f"{days}d", interval="60m",
+        df = yf.download("^NSEI", period=f"{days}d", interval="30m",
                          auto_adjust=True, progress=False)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
@@ -150,7 +150,7 @@ def download_nifty(days):
 
 def calculate_indicators(raw):
     df = raw[["Open", "High", "Low", "Close", "Volume"]].apply(pd.to_numeric, errors="coerce").dropna()
-    if len(df) < 30:
+    if len(df) < 50:
         return pd.DataFrame()
 
     df["Date"] = df.index.date
@@ -537,14 +537,14 @@ def split_stats(trades):
 # ============================================================
 
 st.markdown("# ⚡ Intraday Pulse")
-st.caption("1-Hour Interval + Daily Gatekeeper Edition (Holding Bars = 4).")
+st.caption("30-Minute Interval + Daily Gatekeeper Edition (1.5-Hour Hold, 10:00-2:00 Window).")
 
 scan_tab, backtest_tab = st.tabs(["🚀 Live Scanner", "📈 Backtest"])
 
 with scan_tab:
     if st.button("🚀 Run Instant Market Scan", type="primary", key="scan", **STRETCH):
         try:
-            with st.spinner(f"Scanning {len(MASTER_WATCHLIST)} 1-hour charts with Daily Filter..."):
+            with st.spinner(f"Scanning {len(MASTER_WATCHLIST)} 30-minute charts with Daily Filter..."):
                 stock_data, dl_errors = download_market_data(tuple(MASTER_WATCHLIST), DATA_DAYS)
                 nifty = download_nifty(DATA_DAYS)
                 results, market_info, skipped = run_live_scan(stock_data, nifty)
@@ -555,7 +555,7 @@ with scan_tab:
             st.error(f"Scan failed: {e}")
 
     if "live_results" not in st.session_state:
-        st.info("Tap **Run Instant Market Scan** to analyse the 1-hour watchlist.")
+        st.info("Tap **Run Instant Market Scan** to analyse the 30-minute watchlist.")
     else:
         results, mi = st.session_state["live_results"], st.session_state["market_info"]
         now = pd.Timestamp.now(tz=IST)
@@ -568,19 +568,19 @@ with scan_tab:
         c4.metric("Breakouts", int((results["Breakout"] == "YES").sum()) if len(results) else 0)
 
         if results.empty:
-            st.warning("No stocks passed the daily gatekeeper and 1-hour breakout filters.")
+            st.warning("No stocks passed the daily gatekeeper and 30-minute breakout filters.")
         else:
             st.dataframe(results, hide_index=True, **STRETCH)
             st.download_button("⬇️ Download Results CSV", results.to_csv(index=False).encode("utf-8"),
-                               "1h_scan_results.csv", "text/csv", **STRETCH)
+                               "30m_scan_results.csv", "text/csv", **STRETCH)
 
 with backtest_tab:
-    st.subheader("📈 1-Hour Strategy Backtest")
-    st.warning("Net of costs. 1-hour interval with 4-bar holding period and Daily Gatekeeper pre-filter.")
+    st.subheader("📈 30-Minute Strategy Backtest")
+    st.warning("Net of costs. 30-minute interval with 1.5-hour holding period (3 bars) and 10:00-2:00 entry window.")
 
     if st.button("📊 Run Historical Backtest", type="primary", key="bt", **STRETCH):
         try:
-            with st.spinner("Running 1-hour portfolio simulation..."):
+            with st.spinner("Running 30-minute portfolio simulation..."):
                 trades, errors, skipped = run_full_backtest(tuple(MASTER_WATCHLIST), DATA_DAYS)
             st.session_state.update(backtest_trades=trades, bt_errors=errors, bt_skipped=skipped)
         except Exception as e:
@@ -612,4 +612,4 @@ with backtest_tab:
             st.subheader("📒 Trade Log")
             st.dataframe(trades, hide_index=True, **STRETCH)
             st.download_button("⬇️ Download Trade Log CSV", trades.to_csv(index=False).encode("utf-8"),
-                               "1h_backtest_trade_log.csv", "text/csv", **STRETCH)
+                               "30m_backtest_trade_log.csv", "text/csv", **STRETCH)
