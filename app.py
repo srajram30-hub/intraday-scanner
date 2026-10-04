@@ -615,7 +615,7 @@ def run_live_scan(stock_data, nifty):
             "Stop Loss": round(stop, 2),
             "Target": round(target, 2),
             "Risk/Share": round(risk, 2),
-            "R:R": round(target_r, 2),
+            "R:R": round(TARGET_R, 2),
             "RSI": round(s["rsi"], 1),
             "RVOL": round(s["rvol"], 2),
             "Relative Strength": round(s["rs"], 2),
