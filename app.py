@@ -7,7 +7,7 @@ import streamlit as st
 import yfinance as yf
 
 # ============================================================
-# INTRADAY PULSE — 1-HOUR + DAILY GATEKEEPER CROSS-CHECK EDITION
+# INTRADAY PULSE — FINAL 1-HOUR + DAILY GATEKEEPER EDITION
 # ============================================================
 
 st.set_page_config(page_title="Intraday Pulse", page_icon="⚡", layout="wide",
@@ -22,21 +22,21 @@ def _ver(v):
 
 STRETCH = {"width": "stretch"} if _ver(st.__version__) >= (1, 50) else {"use_container_width": True}
 
-# ---------------- Parameters (1-Hour Interval, 8-Bar Hold, Score 80) ----------------
+# ---------------- Parameters (Optimized for Stability & Low Drawdown) ----------------
 MIN_SCORE = 65
 STRONG_SCORE = 80
 RVOL_THRESHOLD = 1.35
 BREAKOUT_BUFFER = 0.0015
 MAX_EXTENSION = 2.5
 DATA_DAYS = 59
-HOLDING_BARS = 8               # 8 hourly bars = ~1 trading day (matches the 45% win rate setup)
+HOLDING_BARS = 8               # 8 hourly bars = ~1 full trading day
 TARGET_R = 1.5
 BACKTEST_SCORE = 80
 ENTRY_BUFFER = 0.001
 SKIP_OPEN_BARS = 1             # Skip first hourly bar (9:15 - 10:15 noise)
 LAST_SIGNAL_TIME = "14:15"
 COOLDOWN_BARS = 2
-MIN_DAILY_TURNOVER = 5e7
+MIN_DAILY_TURNOVER = 5e7       # Rs 5 crore prior-day liquidity filter
 SLIPPAGE_PCT = 0.05
 COST_ROUND_TRIP_PCT = 0.10
 OOS_FRACTION = 0.30
@@ -537,7 +537,7 @@ def split_stats(trades):
 # ============================================================
 
 st.markdown("# ⚡ Intraday Pulse")
-st.caption("1-Hour Interval + Daily Gatekeeper Cross-Check Edition (8-Bar Hold, Score >= 80).")
+st.caption("Final 1-Hour Edition + Daily Gatekeeper Pre-Filter (Rule A/B).")
 
 scan_tab, backtest_tab = st.tabs(["🚀 Live Scanner", "📈 Backtest"])
 
@@ -555,7 +555,7 @@ with scan_tab:
             st.error(f"Scan failed: {e}")
 
     if "live_results" not in st.session_state:
-        st.info("Tap **Run Instant Market Scan** to analyse the 1-hour watchlist.")
+        st.info("Tap **Run Instant Market Scan** to analyse the 1-hour watchlist for tomorrow.")
     else:
         results, mi = st.session_state["live_results"], st.session_state["market_info"]
         now = pd.Timestamp.now(tz=IST)
@@ -572,11 +572,11 @@ with scan_tab:
         else:
             st.dataframe(results, hide_index=True, **STRETCH)
             st.download_button("⬇️ Download Results CSV", results.to_csv(index=False).encode("utf-8"),
-                               "1h_scan_results.csv", "text/csv", **STRETCH)
+                               "final_1h_scan_results.csv", "text/csv", **STRETCH)
 
 with backtest_tab:
     st.subheader("📈 1-Hour Strategy Backtest")
-    st.warning("Net of costs. 1-hour interval with 8-bar holding period and Daily Gatekeeper pre-filter.")
+    st.warning("Net of costs. 1-hour interval with 8-bar hold and Daily Gatekeeper pre-filter.")
 
     if st.button("📊 Run Historical Backtest", type="primary", key="bt", **STRETCH):
         try:
@@ -612,4 +612,4 @@ with backtest_tab:
             st.subheader("📒 Trade Log")
             st.dataframe(trades, hide_index=True, **STRETCH)
             st.download_button("⬇️ Download Trade Log CSV", trades.to_csv(index=False).encode("utf-8"),
-                               "1h_backtest_trade_log.csv", "text/csv", **STRETCH)
+                               "final_1h_backtest_trade_log.csv", "text/csv", **STRETCH)
