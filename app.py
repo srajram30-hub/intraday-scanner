@@ -11,7 +11,7 @@ st.markdown("This web app runs Python in the cloud to evaluate your 4 technical 
 st.sidebar.header("🔍 Stock Parameter Inputs")
 stock_symbol = st.sidebar.selectbox("Select Watchlist Stock", ["RELIANCE.NS", "TCS.NS", "SBIN.NS", "BHARTIARTL.NS", "HCLTECH.NS"])
 
-# Fetch live price using yfinance (as a cloud-friendly alternative to GoogleFinance)
+# Fetch live price using yfinance
 try:
     ticker_data = yf.Ticker(stock_symbol)
     todays_data = ticker_data.history(period="1d")
@@ -83,4 +83,4 @@ elif box_color == "warning":
 else:
     st.error(f"**Final Trading Decision:** {decision}")
 
-st.info(**Risk Action Plan:** {action})
+st.info(f"**Risk Action Plan:** {action}")
