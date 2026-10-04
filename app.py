@@ -3,12 +3,72 @@ import pandas as pd
 import yfinance as yf
 import numpy as np
 
-st.set_page_config(page_title="Master Intraday Breakout & Momentum Scanner", layout="wide")
+# Page configuration for mobile-friendly view
+st.set_page_config(page_title="Intraday Pulse", page_icon="⚡", layout="centered")
 
-st.title("⚡ Master Intraday Breakout & Momentum Scanner (v2)")
-st.markdown("Quantitative scoring model running across your comprehensive Indian stock universe with **Session VWAP & Weighted Pillars**.")
+# Custom CSS for Sleek Mobile App UI
+st.markdown("""
+    <style>
+    .main {
+        background-color: #0e1117;
+    }
+    .stock-card {
+        background-color: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 12px;
+        padding: 16px;
+        margin-bottom: 14px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+    }
+    .stock-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 18px;
+        font-weight: 700;
+        color: #f0f6fc;
+    }
+    .stock-price {
+        font-size: 16px;
+        color: #8b949e;
+    }
+    .badge-green {
+        background-color: #238636;
+        color: white;
+        padding: 4px 10px;
+        border-radius: 20px;
+        font-size: 14px;
+        font-weight: 600;
+    }
+    .badge-yellow {
+        background-color: #9e6a03;
+        color: white;
+        padding: 4px 10px;
+        border-radius: 20px;
+        font-size: 14px;
+        font-weight: 600;
+    }
+    .badge-red {
+        background-color: #da3633;
+        color: white;
+        padding: 4px 10px;
+        border-radius: 20px;
+        font-size: 14px;
+        font-weight: 600;
+    }
+    .metric-row {
+        display: flex;
+        justify-content: space-between;
+        margin-top: 10px;
+        font-size: 14px;
+        color: #c9d1d9;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
-# Your complete master stock watchlist
+st.title("⚡ Intraday Pulse")
+st.markdown("Mobile-Optimized Momentum & Breakout Scanner")
+
 master_watchlist = [
     "HFCL.NS", "RBLBANK.NS", "CUB.NS", "SAILIFE.NS", "AEGISLOG.NS", "ANGELONE.NS", 
     "CAMS.NS", "TDPOWERSYS.NS", "NEULANDLAB.NS", "LALPATHLAB.NS", "KARURVYSYA.NS", 
@@ -49,18 +109,15 @@ def scan_master_market(tickers):
             if df.empty or len(df) < 25:
                 continue
                 
-            # Technical Indicators
             df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
             df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
             
-            # RSI (14)
             delta = df['Close'].diff()
             gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
             loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
             rs = gain / loss
             df['RSI'] = 100 - (100 / (1 + rs))
             
-            # True Session VWAP (Resets daily)
             df['Date'] = df.index.date
             df['Typical_Price'] = (df['High'] + df['Low'] + df['Close']) / 3
             df['TP_Vol'] = df['Typical_Price'] * df['Volume']
@@ -68,7 +125,6 @@ def scan_master_market(tickers):
             df['Cum_Vol'] = df['Volume'].groupby(df['Date']).cumsum()
             df['Session_VWAP'] = df['Cum_TP_Vol'] / df['Cum_Vol']
             
-            # ATR (14)
             high_low = df['High'] - df['Low']
             high_close = np.abs(df['High'] - df['Close'].shift())
             low_close = np.abs(df['Low'] - df['Close'].shift())
@@ -81,47 +137,38 @@ def scan_master_market(tickers):
             prev_close = df['Close'].iloc[-2]
             change_pct = ((current_price - prev_close) / prev_close) * 100
             
-            # --- WEIGHTED SCORING ENGINE (0 - 100) ---
             score = 0
             reasons = []
             invalidation_triggers = []
             
-            # 1. Candle Strength (+15 pts)
+            # Scoring logic
             candle_body = abs(latest['Close'] - latest['Open'])
             candle_range = latest['High'] - latest['Low']
-            is_strong_candle = (latest['Close'] > latest['Open']) and (candle_range > 0 and (candle_body / candle_range) > 0.4)
-            if is_strong_candle:
+            if (latest['Close'] > latest['Open']) and (candle_range > 0 and (candle_body / candle_range) > 0.4):
                 score += 15
                 reasons.append("Strong Candle (+15)")
             else:
-                invalidation_triggers.append("Weak/Doji candle")
+                invalidation_triggers.append("Weak Candle")
 
-            # 2. 20-Bar Breakout (+25 pts)
             recent_high = df['High'].iloc[-21:-1].max()
-            is_breakout = current_price >= recent_high
-            if is_breakout:
+            if current_price >= recent_high:
                 score += 25
-                reasons.append("20-Bar Breakout (+25)")
+                reasons.append("Breakout (+25)")
             else:
-                invalidation_triggers.append("Below resistance")
+                invalidation_triggers.append("No Breakout")
 
-            # 3. Above 20 EMA (+15 pts)
-            is_above_ema = current_price > latest['EMA_20']
-            if is_above_ema:
+            if current_price > latest['EMA_20']:
                 score += 15
-                reasons.append("Above 20 EMA (+15)")
+                reasons.append("Above EMA (+15)")
             else:
-                invalidation_triggers.append("Below 20 EMA")
+                invalidation_triggers.append("Below EMA")
 
-            # 4. Above Session VWAP (+15 pts)
-            is_above_vwap = current_price > latest['Session_VWAP']
-            if is_above_vwap:
+            if current_price > latest['Session_VWAP']:
                 score += 15
-                reasons.append("Above Session VWAP (+15)")
+                reasons.append("Above VWAP (+15)")
             else:
-                invalidation_triggers.append("Below Session VWAP")
+                inulation_triggers = invalidation_triggers.append("Below VWAP")
 
-            # 5. RVOL > 1.3 (+20 pts)
             rvol = latest['Volume'] / latest['Vol_MA20'] if latest['Vol_MA20'] > 0 else 0
             if rvol > 1.3:
                 score += 20
@@ -129,44 +176,41 @@ def scan_master_market(tickers):
             else:
                 invalidation_triggers.append(f"Low RVOL ({rvol:.1f}x)")
 
-            # 6. RSI Health 50-75 (+10 pts)
             rsi_val = latest['RSI'] if not np.isnan(latest['RSI']) else 50
             if 50 <= rsi_val <= 75:
                 score += 10
                 reasons.append(f"RSI {rsi_val:.1f} (+10)")
             elif rsi_val > 75:
                 score += 5
-                reasons.append(f"RSI Overbought ({rsi_val:.1f}) (+5)")
+                reasons.append(f"RSI Overbought (+5)")
             else:
-                invalidation_triggers.append(f"RSI Weak ({rsi_val:.1f})")
+                invalidation_triggers.append(f"Weak RSI")
 
-            # --- VERDICT TIERS ---
             if score >= 80:
-                verdict = "🟢 STRONG SETUP (BUY)"
+                badge_class = "badge-green"
+                verdict_text = "🟢 STRONG SETUP"
             elif score >= 65:
-                verdict = "🟡 CONDITIONAL WATCH"
-            elif score >= 50:
-                verdict = "⚪ WEAK / NEUTRAL"
+                badge_class = "badge-yellow"
+                verdict_text = "🟡 WATCHLIST"
             else:
-                verdict = "🔴 AVOID"
+                badge_class = "badge-red"
+                verdict_text = "🔴 AVOID"
 
-            # Structure-Aware Risk Management
             atr_val = latest['ATR'] if not np.isnan(latest['ATR']) else (current_price * 0.005)
-            structural_sl = latest['Low']
-            atr_sl = current_price - (1.5 * atr_val)
-            stop_loss = round(max(structural_sl, atr_sl), 2)
+            stop_loss = round(max(latest['Low'], current_price - (1.5 * atr_val)), 2)
             target_price = round(current_price + (2.5 * atr_val), 2)
 
             results.append({
                 "Stock": ticker.replace(".NS", ""),
-                "Price (₹)": round(current_price, 2),
-                "Change %": round(change_pct, 2),
+                "Price": round(current_price, 2),
+                "Change": round(change_pct, 2),
                 "Score": score,
-                "Verdict": verdict,
-                "Stop-Loss (₹)": stop_loss,
-                "Target (₹)": target_price,
-                "Why Score?": ", ".join(reasons),
-                "Invalidation Factors": ", ".join(invalidation_triggers)
+                "Badge": badge_class,
+                "Verdict": verdict_text,
+                "StopLoss": stop_loss,
+                "Target": target_price,
+                "Why": ", ".join(reasons),
+                "Invalidation": ", ".join(invalidation_triggers)
             })
         except:
             continue
@@ -176,14 +220,46 @@ def scan_master_market(tickers):
         df_res = df_res.sort_values(by="Score", ascending=False)
     return df_res
 
-if st.button("🚀 Run Master Market Scan"):
-    with st.spinner(f"Scanning your master list of {len(master_watchlist)} stocks... Please wait a moment."):
+# Filter option for mobile users
+min_score_filter = st.sidebar.slider("Minimum Score Filter", 0, 100, 0)
+
+if st.button("🚀 Run Mobile Scan", use_container_width=True):
+    with st.spinner("Scanning market and building mobile cards..."):
         df_results = scan_master_market(master_watchlist)
         
         if not df_results.empty:
-            st.success(f"Scan complete! Successfully analyzed and ranked {len(df_results)} stocks.")
-            st.dataframe(df_results, use_container_width=True)
+            filtered_df = df_results[df_results["Score"] >= min_score_filter]
+            st.success(f"Found {len(filtered_df)} setups matching criteria.")
+            
+            for index, row in filtered_df.iterrows():
+                change_color = "#3fb950" if row['Change'] >= 0 else "#f85149"
+                
+                # Render clean mobile card UI
+                st.markdown(f"""
+                    <div class="stock-card">
+                        <div class="stock-header">
+                            <span>{row['Stock']}</span>
+                            <span class="{row['Badge']}">{row['Score']}/100</span>
+                        </div>
+                        <div class="metric-row">
+                            <span class="stock-price">₹{row['Price']:,.2f}</span>
+                            <span style="color: {change_color}; font-weight: 600;">{row['Change']:+.2f}%</span>
+                            <span style="color: #f0f6fc; font-weight: 500;">{row['Verdict']}</span>
+                        </div>
+                        <hr style="border-color: #30363d; margin: 8px 0;">
+                        <div class="metric-row">
+                            <span>🛑 SL: <b>₹{row['StopLoss']}</b></span>
+                            <span>🎯 Target: <b>₹{row['Target']}</b></span>
+                        </div>
+                        <div style="font-size: 12px; color: #8b949e; margin-top: 6px;">
+                            <b>Why:</b> {row['Why']}
+                        </div>
+                        <div style="font-size: 12px; color: #f85149; margin-top: 2px;">
+                            <b>Risks:</b> {row['Invalidation']}
+                        </div>
+                    </div>
+                """, unsafe_allow_html=True)
         else:
             st.error("Could not fetch market data right now. Please try again.")
 else:
-    st.info("Click the **'Run Master Market Scan'** button above to evaluate your entire master universe instantly.")
+    st.info("Tap the **'Run Mobile Scan'** button above to load your cards.")
