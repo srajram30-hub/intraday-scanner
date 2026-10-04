@@ -6,7 +6,7 @@ from datetime import datetime
 import time
 
 # ============================================================
-# INTRADAY PULSE — BALANCED HIGH-WIN-RATE EDITION
+# INTRADAY PULSE — CLASSIC TECHNICAL EDITION
 # ============================================================
 
 st.set_page_config(
@@ -17,18 +17,18 @@ st.set_page_config(
 )
 
 # ============================================================
-# BALANCED PARAMETERS (High Frequency + Realistic 1.5R Target)
+# CORE CLASSIC PARAMETERS (No Curve-Fitting)
 # ============================================================
 
 MIN_SCORE = 60
 STRONG_SCORE = 75
-RVOL_THRESHOLD = 1.35     # Realistic volume expansion
-BREAKOUT_BUFFER = 0.0015  # 0.15% breakout buffer
-MAX_EXTENSION = 2.5       # Reasonable extension limit
+RVOL_THRESHOLD = 1.35     # Classic volume expansion filter
+BREAKOUT_BUFFER = 0.0015  # 0.15% resistance clear buffer
+MAX_EXTENSION = 2.5       # Reasonable extension guardrail
 DATA_DAYS = 60
 HOLDING_BARS = 8
-TARGET_R = 1.5            # Optimized for higher win rate & faster profit-taking
-BACKTEST_SCORE = 75       # Balanced quality threshold
+TARGET_R = 1.5            # Realistic intraday target
+BACKTEST_SCORE = 75
 ENTRY_BUFFER = 0.001
 MIN_BARS_BETWEEN_TRADES = 5
 
@@ -139,7 +139,7 @@ def download_nifty(days):
         return pd.DataFrame()
 
 # ============================================================
-# INDICATORS & SCORING
+# TECHNICAL INDICATORS & CLASSIC MOMENTUM RULES
 # ============================================================
 
 def calculate_indicators(df):
@@ -153,14 +153,17 @@ def calculate_indicators(df):
     if len(df) < 40:
         return pd.DataFrame()
 
+    # Trend Indicator: 20 Exponential Moving Average
     df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
 
+    # Momentum Indicator: 14-period RSI
     delta = df["Close"].diff()
     gain = delta.clip(lower=0).rolling(14).mean()
     loss = (-delta.clip(upper=0)).rolling(14).mean()
     rs = gain / loss.replace(0, np.nan)
     df["RSI"] = 100 - (100 / (1 + rs))
 
+    # Volatility Indicator: 14-period ATR
     prev = df["Close"].shift(1)
     tr = pd.concat([
         df["High"] - df["Low"],
@@ -169,6 +172,7 @@ def calculate_indicators(df):
     ], axis=1).max(axis=1)
     df["ATR"] = tr.rolling(14).mean()
 
+    # Intraday Benchmark: Session VWAP
     df["Date"] = df.index.date
     df["TypicalPrice"] = (df["High"] + df["Low"] + df["Close"]) / 3
     df["TPVolume"] = df["TypicalPrice"] * df["Volume"]
@@ -176,6 +180,7 @@ def calculate_indicators(df):
     df["CumVolume"] = df["Volume"].groupby(df["Date"]).cumsum()
     df["VWAP"] = df["CumTPVolume"] / df["CumVolume"].replace(0, np.nan)
 
+    # Classic Resistance & Breakout Structure
     df["Previous20High"] = df["High"].rolling(20).max().shift(1)
     df["Breakout"] = (
         df["Close"] >
@@ -196,6 +201,7 @@ def calculate_indicators(df):
         ages.append(age)
     df["BreakoutAge"] = ages
 
+    # Classic Candle Structure & Persistence Checks
     candle_range = (df["High"] - df["Low"]).replace(0, np.nan)
     body = abs(df["Close"] - df["Open"])
     df["BodyPct"] = body / candle_range
@@ -211,6 +217,11 @@ def calculate_indicators(df):
         (df["UpperWickPct"] <= 0.30)
     )
 
+    # Classic Technical Addition: Consecutive Bullish Momentum (Last 2 bars green)
+    df["IsGreen"] = df["Close"] > df["Open"]
+    df["ConsecutiveGreen"] = df["IsGreen"] & df["IsGreen"].shift(1).fillna(False)
+
+    # Time-of-day Volume Relative Expansion (RVOL)
     df["BarTime"] = df.index.strftime("%H:%M")
     historical = df.copy()
     current_date = df["Date"].iloc[-1]
@@ -283,7 +294,7 @@ def score_at(df, nifty, i):
     row = df.iloc[i]
 
     vals = ["Close", "EMA20", "VWAP", "RSI", "ATR", "RVOL",
-            "Previous20High", "Return5"]
+            "Previous20High", "Return5", "ConsecutiveGreen"]
     if any(pd.isna(row[v]) for v in vals):
         return None
 
@@ -299,6 +310,7 @@ def score_at(df, nifty, i):
     breakout = bool(row["Breakout"])
     fresh = bool(row["FreshBreakout"])
     strong_candle = bool(row["StrongCandle"])
+    consecutive_green = bool(row["ConsecutiveGreen"])
     rsi_rising = bool(row["RSIRising"])
     breakout_age = int(row["BreakoutAge"])
 
@@ -312,6 +324,7 @@ def score_at(df, nifty, i):
     reasons = []
     risks = []
 
+    # Classic Technical Rule 1: Trend Alignment (EMA20 & VWAP)
     if price > ema:
         score += 10
         reasons.append("Above EMA20")
@@ -324,79 +337,61 @@ def score_at(df, nifty, i):
     else:
         risks.append("Below VWAP")
 
+    # Classic Technical Rule 2: Resistance Breakout
     if breakout:
         score += 15
         reasons.append("20-bar breakout")
 
         distance = (price / prev_high - 1) * 100
-        if distance >= 0.30:
-            score += 5
-            reasons.append("Strong breakout distance")
-        elif distance >= 0.15:
+        if distance >= 0.15:
             score += 3
-            reasons.append("Confirmed breakout distance")
+            reasons.append("Clean breakout clearance")
 
         if fresh:
             score += 5
             reasons.append("Fresh breakout")
-        elif breakout_age <= 3:
-            score += 3
-            reasons.append("Recent breakout")
-        elif breakout_age > 6:
-            risks.append("Aging breakout")
     else:
-        risks.append("No confirmed breakout")
+        risks.append("No breakout")
 
+    # Classic Technical Rule 3: Volume Confirmation (RVOL)
     if rvol >= RVOL_THRESHOLD:
         score += 15
-        reasons.append(f"Strong RVOL {rvol:.1f}x")
-    elif rvol >= 1.0:
-        score += 5
-        reasons.append(f"Normal RVOL {rvol:.1f}x")
+        reasons.append(f"Volume expansion {rvol:.1f}x")
     else:
-        risks.append(f"Low RVOL {rvol:.1f}x")
+        risks.append(f"Normal/Low volume {rvol:.1f}x")
 
-    if 55 <= rsi <= 75:
+    # Classic Technical Rule 4: Momentum & Persistence (RSI + Consecutive Green Bars)
+    if 50 <= rsi <= 75:
         score += 8
         reasons.append(f"Healthy RSI {rsi:.1f}")
-    elif rsi > 75:
-        score += 4
-        risks.append(f"High RSI {rsi:.1f}")
     else:
-        risks.append(f"Weak RSI {rsi:.1f}")
+        risks.append(f"RSI level {rsi:.1f}")
 
     if rsi_rising:
         score += 4
         reasons.append("RSI rising")
+
+    if consecutive_green:
+        score += 5
+        reasons.append("Consecutive green candles (persistence)")
     else:
-        risks.append("RSI not rising")
+        risks.append("Single-bar move")
 
     if strong_candle:
         score += 3
-        reasons.append("Strong candle")
-    else:
-        risks.append("Weak candle")
+        reasons.append("Strong closing range")
 
+    # Classic Technical Rule 5: Relative Strength vs Index
     if rs >= 0.5:
         score += 10
         reasons.append("Positive RS vs NIFTY")
     else:
         risks.append("Weak RS vs NIFTY")
 
-    if market_score >= 10:
-        score += 10
-        reasons.append("Bullish NIFTY")
-    elif market_score >= 5:
+    # Market Regime Factor
+    if market_score >= 5:
         score += 5
-        reasons.append("Neutral NIFTY")
-    else:
-        risks.append("Bearish NIFTY")
-
-    if extension <= MAX_EXTENSION:
-        score += 5
-        reasons.append("Not overextended")
-    else:
-        risks.append(f"Extended {extension:.1f}% / 5 bars")
+        reasons.append("Supportive market context")
 
     return {
         "score": int(min(max(score, 0), 100)),
@@ -436,7 +431,6 @@ def trade_levels(df, i, price, atr):
         risk = price * 0.01
         stop = price - risk
 
-    # Optimized target with slight safety buffer (1.5R target ensures higher hit rate)
     target = price + TARGET_R * risk
     return float(stop), float(target), float(risk)
 
@@ -677,7 +671,7 @@ def calculate_backtest_stats(trades):
 # ============================================================
 
 st.markdown("# ⚡ Intraday Pulse")
-st.markdown("High-Speed Breakout & Momentum Command Center")
+st.markdown("Classic Technical Breakout & Momentum Command Center")
 
 scan_tab, backtest_tab = st.tabs(["🚀 Live Scanner", "📈 Backtest"])
 
@@ -687,7 +681,7 @@ scan_tab, backtest_tab = st.tabs(["🚀 Live Scanner", "📈 Backtest"])
 
 with scan_tab:
     if st.button("🚀 Run Instant Market Scan", use_container_width=True, type="primary"):
-        with st.spinner(f"Scanning {len(MASTER_WATCHLIST)} stocks..."):
+        with st.spinner(f"Scanning {len(MASTER_WATCHLIST)} stocks with classic technical rules..."):
             stock_data, errors = download_market_data(tuple(MASTER_WATCHLIST), DATA_DAYS)
             nifty = download_nifty(DATA_DAYS)
             results, market_info = run_live_scan(stock_data, nifty)
@@ -732,7 +726,7 @@ with scan_tab:
 
 with backtest_tab:
     st.subheader("📈 Historical Strategy Backtest Engine")
-    st.warning("Simulating balanced intraday rules with an optimized 1.5R target for higher win rates.")
+    st.warning("Simulating classic intraday breakout rules with multi-bar momentum and 1.5R targets.")
 
     if st.button("📊 Run Historical Backtest", use_container_width=True, type="primary"):
         with st.spinner("Running historical event-by-event backtest..."):
