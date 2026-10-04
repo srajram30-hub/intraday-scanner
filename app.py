@@ -1,265 +1,648 @@
+
 import streamlit as st
 import pandas as pd
 import yfinance as yf
 import numpy as np
+from datetime import datetime
+import time
 
-# Page configuration for mobile-friendly view
-st.set_page_config(page_title="Intraday Pulse", page_icon="⚡", layout="centered")
+# ============================================================
+# INTRADAY PULSE V4
+# V3 SCANNER + HISTORICAL BACKTEST ENGINE
+# ============================================================
 
-# Custom CSS for Sleek Mobile App UI
-st.markdown("""
-    <style>
-    .main {
-        background-color: #0e1117;
-    }
-    .stock-card {
-        background-color: #161b22;
-        border: 1px solid #30363d;
-        border-radius: 12px;
-        padding: 16px;
-        margin-bottom: 14px;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
-    }
-    .stock-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        font-size: 18px;
-        font-weight: 700;
-        color: #f0f6fc;
-    }
-    .stock-price {
-        font-size: 16px;
-        color: #8b949e;
-    }
-    .badge-green {
-        background-color: #238636;
-        color: white;
-        padding: 4px 10px;
-        border-radius: 20px;
-        font-size: 14px;
-        font-weight: 600;
-    }
-    .badge-yellow {
-        background-color: #9e6a03;
-        color: white;
-        padding: 4px 10px;
-        border-radius: 20px;
-        font-size: 14px;
-        font-weight: 600;
-    }
-    .badge-red {
-        background-color: #da3633;
-        color: white;
-        padding: 4px 10px;
-        border-radius: 20px;
-        font-size: 14px;
-        font-weight: 600;
-    }
-    .metric-row {
-        display: flex;
-        justify-content: space-between;
-        margin-top: 10px;
-        font-size: 14px;
-        color: #c9d1d9;
-    }
-    </style>
-""", unsafe_allow_html=True)
+st.set_page_config(
+    page_title="Intraday Pulse V4",
+    page_icon="⚡",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
 
-st.title("⚡ Intraday Pulse")
-st.markdown("Mobile-Optimized Momentum & Breakout Scanner")
+# ============================================================
+# MASTER WATCHLIST
+# ============================================================
 
-master_watchlist = [
-    "HFCL.NS", "RBLBANK.NS", "CUB.NS", "SAILIFE.NS", "AEGISLOG.NS", "ANGELONE.NS", 
-    "CAMS.NS", "TDPOWERSYS.NS", "NEULANDLAB.NS", "LALPATHLAB.NS", "KARURVYSYA.NS", 
-    "TATAELXSI.NS", "ANANDRATHI.NS", "APOLLOTYRE.NS", "NATCOPHARM.NS", "MTARTECH.NS", 
-    "TATACHEM.NS", "ARE&M.NS", "KFINTECH.NS", "IGL.NS", "INOXWIND.NS", "GLAND.NS", 
-    "TATATECH.NS", "BANDHANBNK.NS", "NAVINFLUOR.NS", "ATHERENERG.NS", "NBCC.NS", 
-    "ONESOURCE.NS", "KPITTECH.NS", "CDSL.NS", "SYNGENE.NS", "WOCKPHARMA.NS", 
-    "GESHIP.NS", "REDINGTON.NS", "MANAPPURAM.NS", "POONAWALLA.NS", "KIRLOSENG.NS", 
-    "DELHIVERY.NS", "HSCL.NS", "PNBHOUSING.NS", "PGEL.NS", "AMBER.NS", "CROMPTON.NS", 
-    "KAYNES.NS", "IIFL.NS", "SONACOMS.NS", "AFFLE.NS", "PPLPHARMA.NS", "WELCORP.NS", 
-    "HAVELLS.NS", "FORTIS.NS", "PERSISTENT.NS", "NYKAA.NS", "MFSL.NS", "BHEL.NS", 
-    "MANKIND.NS", "INDUSTOWER.NS", "SRF.NS", "AUROPHARMA.NS", "PRESTIGE.NS", 
-    "FEDERALBNK.NS", "LAURUSLABS.NS", "LUPIN.NS", "GLENMARK.NS", "PHOENIXLTD.NS", 
-    "MARICO.NS", "YESBANK.NS", "OIL.NS", "IDFCFIRSTB.NS", "PAYTM.NS", "HEROMOTOCO.NS", 
-    "UNITDSPR.NS", "INDHOTEL.NS", "NHPC.NS", "TIINDIA.NS", "SUZLON.NS", "HINDPETRO.NS", 
-    "DABUR.NS", "NAUKRI.NS", "INDUSINDBK.NS", "ICICIGI.NS", "NATIONALUM.NS", 
-    "JSWENERGY.NS", "GODREJPROP.NS", "GMRAIRPORT.NS", "AUBANK.NS", "ASHOKLEY.NS", 
-    "NMDC.NS", "BHARATFORG.NS", "MCX.NS", "DIXON.NS", "APLAPOLLO.NS", "RECLTD.NS", 
-    "UPL.NS", "SWIGGY.NS", "POLICYBZR.NS", "INFY.NS", "HDFCLIFE.NS", "HDFCBANK.NS", 
-    "SBILIFE.NS", "MAXHEALTH.NS", "TCS.NS", "HCLTECH.NS", "TATACONSUM.NS", "TECHM.NS", 
-    "KOTAKBANK.NS", "ASIANPAINT.NS", "BAJAJFINSV.NS", "HINDALCO.NS", "CIPLA.NS", 
-    "NESTLEIND.NS", "APOLLOHOSP.NS", "SBIN.NS", "AXISBANK.NS", "ICICIBANK.NS", 
-    "SUNPHARMA.NS", "BHARTIARTL.NS", "COALINDIA.NS", "INDIGO.NS", "BAJFINANCE.NS", 
-    "BEL.NS", "BSE.NS", "ONGC.NS", "TITAN.NS", "TRENT.NS", "JSWSTEEL.NS", "RELIANCE.NS", 
-    "LT.NS", "JIOFIN.NS", "DRREDDY.NS", "ULTRACEMCO.NS", "POWERGRID.NS", "HINDUNILVR.NS", 
-    "NTPC.NS", "ITC.NS", "ADANIENT.NS", "M&M.NS", "EICHERMOT.NS", "GRASIM.NS", 
-    "ADANIPORTS.NS", "TATASTEEL.NS", "SHRIRAMFIN.NS", "MARUTI.NS", "BAJAJ-AUTO.NS"
+MASTER_WATCHLIST = [
+    "HFCL.NS", "RBLBANK.NS", "CUB.NS", "SAILIFE.NS", "AEGISLOG.NS",
+    "ANGELONE.NS", "CAMS.NS", "TDPOWERSYS.NS", "NEULANDLAB.NS",
+    "LALPATHLAB.NS", "KARURVYSYA.NS", "TATAELXSI.NS", "ANANDRATHI.NS",
+    "APOLLOTYRE.NS", "NATCOPHARM.NS", "MTARTECH.NS", "TATACHEM.NS",
+    "ARE&M.NS", "KFINTECH.NS", "IGL.NS", "INOXWIND.NS", "GLAND.NS",
+    "TATATECH.NS", "BANDHANBNK.NS", "NAVINFLUOR.NS", "ATHERENERG.NS",
+    "NBCC.NS", "ONESOURCE.NS", "KPITTECH.NS", "CDSL.NS", "SYNGENE.NS",
+    "WOCKPHARMA.NS", "GESHIP.NS", "REDINGTON.NS", "MANAPPURAM.NS",
+    "POONAWALLA.NS", "KIRLOSENG.NS", "DELHIVERY.NS", "HSCL.NS",
+    "PNBHOUSING.NS", "PGEL.NS", "AMBER.NS", "CROMPTON.NS", "KAYNES.NS",
+    "IIFL.NS", "SONACOMS.NS", "AFFLE.NS", "PPLPHARMA.NS", "WELCORP.NS",
+    "HAVELLS.NS", "FORTIS.NS", "PERSISTENT.NS", "NYKAA.NS", "MFSL.NS",
+    "BHEL.NS", "MANKIND.NS", "INDUSTOWER.NS", "SRF.NS", "AUROPHARMA.NS",
+    "PRESTIGE.NS", "FEDERALBNK.NS", "LAURUSLABS.NS", "LUPIN.NS",
+    "GLENMARK.NS", "PHOENIXLTD.NS", "MARICO.NS", "YESBANK.NS", "OIL.NS",
+    "IDFCFIRSTB.NS", "PAYTM.NS", "HEROMOTOCO.NS", "UNITDSPR.NS",
+    "INDHOTEL.NS", "NHPC.NS", "TIINDIA.NS", "SUZLON.NS", "HINDPETRO.NS",
+    "DABUR.NS", "NAUKRI.NS", "INDUSINDBK.NS", "ICICIGI.NS", "NATIONALUM.NS",
+    "JSWENERGY.NS", "GODREJPROP.NS", "GMRAIRPORT.NS", "AUBANK.NS",
+    "ASHOKLEY.NS", "NMDC.NS", "BHARATFORG.NS", "MCX.NS", "DIXON.NS",
+    "APLAPOLLO.NS", "RECLTD.NS", "UPL.NS", "SWIGGY.NS", "POLICYBZR.NS",
+    "INFY.NS", "HDFCLIFE.NS", "HDFCBANK.NS", "SBILIFE.NS", "MAXHEALTH.NS",
+    "TCS.NS", "HCLTECH.NS", "TATACONSUM.NS", "TECHM.NS", "KOTAKBANK.NS",
+    "ASIANPAINT.NS", "BAJAJFINSV.NS", "HINDALCO.NS", "CIPLA.NS",
+    "NESTLEIND.NS", "APOLLOHOSP.NS", "SBIN.NS", "AXISBANK.NS",
+    "ICICIBANK.NS", "SUNPHARMA.NS", "BHARTIARTL.NS", "COALINDIA.NS",
+    "INDIGO.NS", "BAJFINANCE.NS", "BEL.NS", "BSE.NS", "ONGC.NS",
+    "TITAN.NS", "TRENT.NS", "JSWSTEEL.NS", "RELIANCE.NS", "LT.NS",
+    "JIOFIN.NS", "DRREDDY.NS", "ULTRACEMCO.NS", "POWERGRID.NS",
+    "HINDUNILVR.NS", "NTPC.NS", "ITC.NS", "ADANIENT.NS", "M&M.NS",
+    "EICHERMOT.NS", "GRASIM.NS", "ADANIPORTS.NS", "TATASTEEL.NS",
+    "SHRIRAMFIN.NS", "MARUTI.NS", "BAJAJ-AUTO.NS"
 ]
 
-@st.cache_data(ttl=60)
-def scan_master_market(tickers):
-    results = []
-    for ticker in tickers:
+# ============================================================
+# SETTINGS
+# ============================================================
+
+st.sidebar.header("⚙️ Scanner / Backtest Settings")
+
+MIN_SCORE = st.sidebar.slider("Minimum display/backtest score", 40, 90, 55, 5)
+STRONG_SCORE = st.sidebar.slider("Strong setup score", 70, 95, 80, 5)
+RVOL_THRESHOLD = st.sidebar.slider("Minimum RVOL", 1.0, 3.0, 1.30, 0.10)
+BREAKOUT_BUFFER = st.sidebar.slider("Breakout buffer %", 0.0, 1.0, 0.15, 0.05) / 100
+MAX_EXTENSION = st.sidebar.slider("Maximum 5-bar extension %", 1.0, 6.0, 3.0, 0.5)
+
+DATA_DAYS = st.sidebar.selectbox(
+    "Yahoo intraday history",
+    [30, 45, 60],
+    index=2
+)
+
+HOLDING_BARS = st.sidebar.slider(
+    "Backtest max holding bars",
+    2, 20, 8, 1
+)
+
+TARGET_R = st.sidebar.slider(
+    "Backtest target (R)",
+    1.0, 4.0, 2.0, 0.5
+)
+
+BACKTEST_SCORE = st.sidebar.slider(
+    "Backtest minimum score",
+    50, 95, 80, 5
+)
+
+ENTRY_BUFFER = st.sidebar.slider(
+    "Entry buffer %",
+    0.0, 0.5, 0.0, 0.05
+) / 100
+
+MIN_BARS_BETWEEN_TRADES = st.sidebar.slider(
+    "Minimum bars between same-stock trades",
+    0, 20, 4, 1
+)
+
+SHOW_WATCH = st.sidebar.checkbox("Show conditional setups", True)
+
+# ============================================================
+# STYLE
+# ============================================================
+
+st.markdown("""
+<style>
+.main-title {font-size:42px;font-weight:800;margin-bottom:0;}
+.subtitle {font-size:16px;color:#777;margin-bottom:25px;}
+.stock-card {
+    background:#11161c;border-radius:18px;padding:20px;margin-bottom:18px;
+    border:1px solid #29313a;box-shadow:0 5px 18px rgba(0,0,0,.20);
+}
+.stock-header {display:flex;justify-content:space-between;align-items:center;}
+.stock-name {font-size:25px;font-weight:800;}
+.score {padding:8px 15px;border-radius:20px;font-weight:800;font-size:18px;}
+.green {background:#16883b;color:white;}
+.yellow {background:#c99b00;color:white;}
+.red {background:#a82b2b;color:white;}
+.price {font-size:24px;font-weight:700;}
+.positive {color:#35c759;font-weight:700;}
+.negative {color:#ff4d4d;font-weight:700;}
+.info-row {
+    display:flex;justify-content:space-between;margin-top:10px;
+    padding-top:10px;border-top:1px solid #29313a;
+}
+.label {color:#999;font-size:13px;}
+.value {font-weight:700;}
+</style>
+""", unsafe_allow_html=True)
+
+# ============================================================
+# DATA DOWNLOAD
+# ============================================================
+
+@st.cache_data(ttl=60, show_spinner=False)
+def download_market_data(tickers, days):
+    all_data = {}
+    errors = []
+    chunk_size = 35
+
+    for start in range(0, len(tickers), chunk_size):
+        chunk = list(tickers[start:start + chunk_size])
         try:
-            df = yf.download(ticker, period="5d", interval="15m", progress=False)
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            if df.empty or len(df) < 25:
+            data = yf.download(
+                chunk,
+                period=f"{days}d",
+                interval="15m",
+                auto_adjust=False,
+                progress=False,
+                group_by="ticker",
+                threads=True
+            )
+
+            if data.empty:
+                errors.extend(chunk)
                 continue
-                
-            df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
-            df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
-            
-            delta = df['Close'].diff()
-            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-            rs = gain / loss
-            df['RSI'] = 100 - (100 / (1 + rs))
-            
-            df['Date'] = df.index.date
-            df['Typical_Price'] = (df['High'] + df['Low'] + df['Close']) / 3
-            df['TP_Vol'] = df['Typical_Price'] * df['Volume']
-            df['Cum_TP_Vol'] = df['TP_Vol'].groupby(df['Date']).cumsum()
-            df['Cum_Vol'] = df['Volume'].groupby(df['Date']).cumsum()
-            df['Session_VWAP'] = df['Cum_TP_Vol'] / df['Cum_Vol']
-            
-            high_low = df['High'] - df['Low']
-            high_close = np.abs(df['High'] - df['Close'].shift())
-            low_close = np.abs(df['Low'] - df['Close'].shift())
-            ranges = pd.concat([high_low, high_close, low_close], axis=1)
-            true_range = ranges.max(axis=1)
-            df['ATR'] = true_range.rolling(14).mean()
-            
-            latest = df.iloc[-1]
-            current_price = latest['Close']
-            prev_close = df['Close'].iloc[-2]
-            change_pct = ((current_price - prev_close) / prev_close) * 100
-            
-            score = 0
-            reasons = []
-            invalidation_triggers = []
-            
-            # Scoring logic
-            candle_body = abs(latest['Close'] - latest['Open'])
-            candle_range = latest['High'] - latest['Low']
-            if (latest['Close'] > latest['Open']) and (candle_range > 0 and (candle_body / candle_range) > 0.4):
-                score += 15
-                reasons.append("Strong Candle (+15)")
-            else:
-                invalidation_triggers.append("Weak Candle")
 
-            recent_high = df['High'].iloc[-21:-1].max()
-            if current_price >= recent_high:
-                score += 25
-                reasons.append("Breakout (+25)")
-            else:
-                invalidation_triggers.append("No Breakout")
+            for ticker in chunk:
+                try:
+                    if isinstance(data.columns, pd.MultiIndex):
+                        if ticker in data.columns.get_level_values(0):
+                            df = data[ticker].copy()
+                        elif ticker in data.columns.get_level_values(1):
+                            df = data.xs(ticker, axis=1, level=1).copy()
+                        else:
+                            errors.append(ticker)
+                            continue
+                    else:
+                        df = data.copy()
 
-            if current_price > latest['EMA_20']:
-                score += 15
-                reasons.append("Above EMA (+15)")
-            else:
-                invalidation_triggers.append("Below EMA")
+                    df = df.dropna(subset=["Close"])
+                    if len(df) >= 40:
+                        all_data[ticker] = df
+                    else:
+                        errors.append(ticker)
+                except Exception:
+                    errors.append(ticker)
+        except Exception:
+            errors.extend(chunk)
 
-            if current_price > latest['Session_VWAP']:
-                score += 15
-                reasons.append("Above VWAP (+15)")
-            else:
-                inulation_triggers = invalidation_triggers.append("Below VWAP")
+        time.sleep(0.15)
 
-            rvol = latest['Volume'] / latest['Vol_MA20'] if latest['Vol_MA20'] > 0 else 0
-            if rvol > 1.3:
-                score += 20
-                reasons.append(f"RVOL {rvol:.1f}x (+20)")
-            else:
-                invalidation_triggers.append(f"Low RVOL ({rvol:.1f}x)")
+    return all_data, sorted(set(errors))
 
-            rsi_val = latest['RSI'] if not np.isnan(latest['RSI']) else 50
-            if 50 <= rsi_val <= 75:
-                score += 10
-                reasons.append(f"RSI {rsi_val:.1f} (+10)")
-            elif rsi_val > 75:
-                score += 5
-                reasons.append(f"RSI Overbought (+5)")
-            else:
-                invalidation_triggers.append(f"Weak RSI")
 
-            if score >= 80:
-                badge_class = "badge-green"
-                verdict_text = "🟢 STRONG SETUP"
-            elif score >= 65:
-                badge_class = "badge-yellow"
-                verdict_text = "🟡 WATCHLIST"
-            else:
-                badge_class = "badge-red"
-                verdict_text = "🔴 AVOID"
+@st.cache_data(ttl=60, show_spinner=False)
+def download_nifty(days):
+    try:
+        df = yf.download(
+            "^NSEI",
+            period=f"{days}d",
+            interval="15m",
+            auto_adjust=False,
+            progress=False
+        )
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        return df.dropna(subset=["Close"])
+    except Exception:
+        return pd.DataFrame()
 
-            atr_val = latest['ATR'] if not np.isnan(latest['ATR']) else (current_price * 0.005)
-            stop_loss = round(max(latest['Low'], current_price - (1.5 * atr_val)), 2)
-            target_price = round(current_price + (2.5 * atr_val), 2)
+# ============================================================
+# INDICATORS
+# ============================================================
 
-            results.append({
-                "Stock": ticker.replace(".NS", ""),
-                "Price": round(current_price, 2),
-                "Change": round(change_pct, 2),
-                "Score": score,
-                "Badge": badge_class,
-                "Verdict": verdict_text,
-                "StopLoss": stop_loss,
-                "Target": target_price,
-                "Why": ", ".join(reasons),
-                "Invalidation": ", ".join(invalidation_triggers)
-            })
-        except:
-            continue
-            
-    df_res = pd.DataFrame(results)
-    if not df_res.empty:
-        df_res = df_res.sort_values(by="Score", ascending=False)
-    return df_res
+def calculate_indicators(df):
+    df = df.copy()
 
-# Filter option for mobile users
-min_score_filter = st.sidebar.slider("Minimum Score Filter", 0, 100, 0)
+    for col in ["Open", "High", "Low", "Close", "Volume"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
 
-if st.button("🚀 Run Mobile Scan", use_container_width=True):
-    with st.spinner("Scanning market and building mobile cards..."):
-        df_results = scan_master_market(master_watchlist)
-        
-        if not df_results.empty:
-            filtered_df = df_results[df_results["Score"] >= min_score_filter]
-            st.success(f"Found {len(filtered_df)} setups matching criteria.")
-            
-            for index, row in filtered_df.iterrows():
-                change_color = "#3fb950" if row['Change'] >= 0 else "#f85149"
-                
-                # Render clean mobile card UI
-                st.markdown(f"""
-                    <div class="stock-card">
-                        <div class="stock-header">
-                            <span>{row['Stock']}</span>
-                            <span class="{row['Badge']}">{row['Score']}/100</span>
-                        </div>
-                        <div class="metric-row">
-                            <span class="stock-price">₹{row['Price']:,.2f}</span>
-                            <span style="color: {change_color}; font-weight: 600;">{row['Change']:+.2f}%</span>
-                            <span style="color: #f0f6fc; font-weight: 500;">{row['Verdict']}</span>
-                        </div>
-                        <hr style="border-color: #30363d; margin: 8px 0;">
-                        <div class="metric-row">
-                            <span>🛑 SL: <b>₹{row['StopLoss']}</b></span>
-                            <span>🎯 Target: <b>₹{row['Target']}</b></span>
-                        </div>
-                        <div style="font-size: 12px; color: #8b949e; margin-top: 6px;">
-                            <b>Why:</b> {row['Why']}
-                        </div>
-                        <div style="font-size: 12px; color: #f85149; margin-top: 2px;">
-                            <b>Risks:</b> {row['Invalidation']}
-                        </div>
-                    </div>
-                """, unsafe_allow_html=True)
+    df = df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
+
+    if len(df) < 40:
+        return pd.DataFrame()
+
+    # EMA
+    df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
+
+    # RSI
+    delta = df["Close"].diff()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = (-delta.clip(upper=0)).rolling(14).mean()
+    rs = gain / loss.replace(0, np.nan)
+    df["RSI"] = 100 - (100 / (1 + rs))
+
+    # ATR
+    prev = df["Close"].shift(1)
+    tr = pd.concat([
+        df["High"] - df["Low"],
+        abs(df["High"] - prev),
+        abs(df["Low"] - prev)
+    ], axis=1).max(axis=1)
+    df["ATR"] = tr.rolling(14).mean()
+
+    # Session VWAP
+    df["Date"] = df.index.date
+    df["TypicalPrice"] = (df["High"] + df["Low"] + df["Close"]) / 3
+    df["TPVolume"] = df["TypicalPrice"] * df["Volume"]
+    df["CumTPVolume"] = df["TPVolume"].groupby(df["Date"]).cumsum()
+    df["CumVolume"] = df["Volume"].groupby(df["Date"]).cumsum()
+    df["VWAP"] = df["CumTPVolume"] / df["CumVolume"].replace(0, np.nan)
+
+    # 20-bar resistance
+    df["Previous20High"] = df["High"].rolling(20).max().shift(1)
+    df["Breakout"] = (
+        df["Close"] >
+        df["Previous20High"] * (1 + BREAKOUT_BUFFER)
+    )
+    df["FreshBreakout"] = (
+        df["Breakout"] &
+        ~df["Breakout"].shift(1).fillna(False)
+    )
+
+    # Breakout age without future leakage
+    age = 999
+    ages = []
+    for fresh in df["FreshBreakout"].fillna(False):
+        if fresh:
+            age = 0
+        elif age < 999:
+            age += 1
+        ages.append(age)
+    df["BreakoutAge"] = ages
+
+    # Candle structure
+    candle_range = (df["High"] - df["Low"]).replace(0, np.nan)
+    body = abs(df["Close"] - df["Open"])
+    df["BodyPct"] = body / candle_range
+    df["CloseLocation"] = (df["Close"] - df["Low"]) / candle_range
+    df["UpperWickPct"] = (
+        df["High"] - df[["Open", "Close"]].max(axis=1)
+    ) / candle_range
+
+    df["StrongCandle"] = (
+        (df["Close"] > df["Open"]) &
+        (df["BodyPct"] >= 0.50) &
+        (df["CloseLocation"] >= 0.70) &
+        (df["UpperWickPct"] <= 0.30)
+    )
+
+    # Time-of-day RVOL, calculated only from prior dates
+    df["BarTime"] = df.index.strftime("%H:%M")
+    historical = df.copy()
+    current_date = df["Date"].iloc[-1]
+    historical = historical[historical["Date"] < current_date]
+
+    if len(historical):
+        ref = historical.groupby("BarTime")["Volume"].mean()
+        df["TimeOfDayAvgVolume"] = df["BarTime"].map(ref)
+        df["RVOL"] = df["Volume"] / df["TimeOfDayAvgVolume"]
+    else:
+        df["RVOL"] = df["Volume"] / df["Volume"].rolling(20).mean()
+
+    # Momentum
+    df["RSIRising"] = df["RSI"] > df["RSI"].shift(1)
+    df["Return5"] = (df["Close"] / df["Close"].shift(5) - 1) * 100
+
+    return df
+
+# ============================================================
+# MARKET / RELATIVE STRENGTH
+# ============================================================
+
+def prepare_nifty(df):
+    return calculate_indicators(df) if not df.empty else pd.DataFrame()
+
+
+def relative_strength_at(stock_df, nifty_df, i):
+    try:
+        if i < 5:
+            return 0.0
+        stock_now = stock_df["Close"].iloc[i]
+        stock_prev = stock_df["Close"].iloc[i - 5]
+        stock_ret = (stock_now / stock_prev - 1) * 100
+
+        ts = stock_df.index[i]
+        nifty_slice = nifty_df.loc[:ts]
+        if len(nifty_slice) < 6:
+            return 0.0
+
+        nifty_now = nifty_slice["Close"].iloc[-1]
+        nifty_prev = nifty_slice["Close"].iloc[-6]
+        nifty_ret = (nifty_now / nifty_prev - 1) * 100
+
+        return float(stock_ret - nifty_ret)
+    except Exception:
+        return 0.0
+
+
+def market_regime_at(nifty, i):
+    try:
+        row = nifty.iloc[i]
+        score = 0
+        if row["Close"] > row["EMA20"]:
+            score += 5
+        if row["Close"] > row["VWAP"]:
+            score += 5
+
+        if score >= 10:
+            regime = "🟢 BULLISH"
+        elif score >= 5:
+            regime = "🟡 NEUTRAL"
         else:
-            st.error("Could not fetch market data right now. Please try again.")
-else:
-    st.info("Tap the **'Run Mobile Scan'** button above to load your cards.")
+            regime = "🔴 BEARISH"
+
+        return score, regime
+    except Exception:
+        return 5, "🟡 UNKNOWN"
+
+# ============================================================
+# SCORE AT A HISTORICAL BAR
+# IMPORTANT: ONLY DATA UP TO BAR i IS USED.
+# ============================================================
+
+def score_at(df, nifty, i):
+    if i < 30:
+        return None
+
+    row = df.iloc[i]
+
+    vals = ["Close", "EMA20", "VWAP", "RSI", "ATR", "RVOL",
+            "Previous20High", "Return5"]
+    if any(pd.isna(row[v]) for v in vals):
+        return None
+
+    price = float(row["Close"])
+    ema = float(row["EMA20"])
+    vwap = float(row["VWAP"])
+    rsi = float(row["RSI"])
+    atr = float(row["ATR"])
+    rvol = float(row["RVOL"])
+    prev_high = float(row["Previous20High"])
+    extension = float(row["Return5"])
+
+    breakout = bool(row["Breakout"])
+    fresh = bool(row["FreshBreakout"])
+    strong_candle = bool(row["StrongCandle"])
+    rsi_rising = bool(row["RSIRising"])
+    breakout_age = int(row["BreakoutAge"])
+
+    market_score, market_regime = market_regime_at(
+        nifty,
+        min(i, len(nifty) - 1)
+    )
+    rs = relative_strength_at(df, nifty, i)
+
+    score = 0
+    reasons = []
+    risks = []
+
+    # Trend 20
+    if price > ema:
+        score += 10
+        reasons.append("Above EMA20")
+    else:
+        risks.append("Below EMA20")
+
+    if price > vwap:
+        score += 10
+        reasons.append("Above VWAP")
+    else:
+        risks.append("Below VWAP")
+
+    # Breakout 25
+    if breakout:
+        score += 15
+        reasons.append("20-bar breakout")
+
+        distance = (price / prev_high - 1) * 100
+        if distance >= 0.30:
+            score += 5
+            reasons.append("Strong breakout distance")
+        elif distance >= 0.15:
+            score += 3
+            reasons.append("Confirmed breakout distance")
+
+        if fresh:
+            score += 5
+            reasons.append("Fresh breakout")
+        elif breakout_age <= 3:
+            score += 3
+            reasons.append("Recent breakout")
+        elif breakout_age > 6:
+            risks.append("Aging breakout")
+    else:
+        risks.append("No confirmed breakout")
+
+    # Volume 15
+    if rvol >= 2.0:
+        score += 15
+        reasons.append(f"Exceptional RVOL {rvol:.1f}x")
+    elif rvol >= RVOL_THRESHOLD:
+        score += 10
+        reasons.append(f"Strong RVOL {rvol:.1f}x")
+    elif rvol >= 1.0:
+        score += 5
+        reasons.append(f"Normal RVOL {rvol:.1f}x")
+    else:
+        risks.append(f"Low RVOL {rvol:.1f}x")
+
+    # Momentum 15
+    if 55 <= rsi <= 70:
+        score += 8
+        reasons.append(f"Healthy RSI {rsi:.1f}")
+    elif 70 < rsi <= 80:
+        score += 6
+        reasons.append(f"Strong RSI {rsi:.1f}")
+    elif 50 <= rsi < 55:
+        score += 4
+        reasons.append(f"Developing RSI {rsi:.1f}")
+    elif rsi > 80:
+        score += 2
+        risks.append(f"Overheated RSI {rsi:.1f}")
+    else:
+        risks.append(f"Weak RSI {rsi:.1f}")
+
+    if rsi_rising:
+        score += 4
+        reasons.append("RSI rising")
+    else:
+        risks.append("RSI not rising")
+
+    if strong_candle:
+        score += 3
+        reasons.append("Strong candle")
+    else:
+        risks.append("Weak candle")
+
+    # Relative strength 10
+    if rs >= 1.5:
+        score += 10
+        reasons.append("Strong RS vs NIFTY")
+    elif rs >= 0.75:
+        score += 7
+        reasons.append("Positive RS vs NIFTY")
+    elif rs >= 0.25:
+        score += 4
+        reasons.append("Moderate RS")
+    else:
+        risks.append("Weak RS vs NIFTY")
+
+    # Market 10
+    if market_score >= 10:
+        score += 10
+        reasons.append("Bullish NIFTY")
+    elif market_score >= 5:
+        score += 5
+        reasons.append("Neutral NIFTY")
+    else:
+        risks.append("Bearish NIFTY")
+
+    # Extension/risk 5
+    if extension <= 1.5:
+        score += 5
+        reasons.append("Not extended")
+    elif extension <= MAX_EXTENSION:
+        score += 3
+        reasons.append("Moderately extended")
+    else:
+        risks.append(f"Extended {extension:.1f}% / 5 bars")
+
+    return {
+        "score": int(min(max(score, 0), 100)),
+        "price": price,
+        "atr": atr,
+        "rsi": rsi,
+        "rvol": rvol,
+        "vwap": vwap,
+        "rs": rs,
+        "extension": extension,
+        "breakout": breakout,
+        "fresh": fresh,
+        "breakout_age": breakout_age,
+        "market_score": market_score,
+        "market_regime": market_regime,
+        "reasons": reasons,
+        "risks": risks
+    }
+
+# ============================================================
+# STOP / TARGET
+# ============================================================
+
+def trade_levels(df, i, price, atr, target_r):
+    start = max(0, i - 5)
+    swing_low = float(df["Low"].iloc[start:i].min())
+
+    prev_high = df["Previous20High"].iloc[i]
+
+    if pd.notna(prev_high):
+        structure_stop = min(
+            swing_low,
+            float(prev_high) - 0.5 * atr
+        )
+    else:
+        structure_stop = swing_low
+
+    atr_stop = price - 1.5 * atr
+    stop = max(structure_stop, atr_stop)
+
+    # Keep stop below entry
+    stop = min(stop, price * 0.995)
+
+    risk = price - stop
+
+    if risk <= 0 or not np.isfinite(risk):
+        risk = price * 0.01
+        stop = price - risk
+
+    target = price + target_r * risk
+
+    return float(stop), float(target), float(risk)
+
+# ============================================================
+# LIVE SCANNER
+# ============================================================
+
+def run_live_scan(stock_data, nifty):
+    nifty_ind = prepare_nifty(nifty)
+
+    if nifty_ind.empty:
+        market_info = {"score": 5, "regime": "🟡 UNKNOWN"}
+    else:
+        ms, mr = market_regime_at(nifty_ind, len(nifty_ind) - 1)
+        market_info = {"score": ms, "regime": mr}
+
+    results = []
+
+    for ticker, raw in stock_data.items():
+        df = calculate_indicators(raw)
+        if df.empty or nifty_ind.empty:
+            continue
+
+        i = len(df) - 1
+        s = score_at(df, nifty_ind, i)
+        if s is None:
+            continue
+
+        stop, target, risk = trade_levels(
+            df, i, s["price"], s["atr"], TARGET_R
+        )
+
+        if s["extension"] > MAX_EXTENSION:
+            status = "🟠 EXTENDED"
+        elif s["score"] >= STRONG_SCORE and s["breakout"]:
+            status = "🟢 ENTER / CONFIRM"
+        elif s["score"] >= MIN_SCORE and s["breakout"]:
+            status = "🟡 WATCH BREAKOUT"
+        elif s["score"] >= MIN_SCORE:
+            status = "🟡 WAIT FOR BREAKOUT"
+        else:
+            status = "🔴 AVOID"
+
+        if s["score"] >= STRONG_SCORE and s["breakout"]:
+            verdict = "🟢 STRONG SETUP"
+        elif s["score"] >= MIN_SCORE:
+            verdict = "🟡 CONDITIONAL WATCH"
+        else:
+            verdict = "⚪ WEAK / NEUTRAL"
+
+        prev_close = float(df["Close"].iloc[-2])
+        change = (s["price"] / prev_close - 1) * 100
+
+        results.append({
+            "Stock": ticker.replace(".NS", ""),
+            "Score": s["score"],
+            "Verdict": verdict,
+            "Status": status,
+            "Price": round(s["price"], 2),
+            "Change %": round(change, 2),
+            "Entry": round(s["price"], 2),
+            "Stop Loss": round(stop, 2),
+            "Target": round(target, 2),
+            "Risk/Share": round(risk, 2),
+            "R:R": round(target_r, 2),
+            "RSI": round(s["rsi"], 1),
+            "RVOL": round(s["rvol"], 2),
+            "Relative Strength": round(s["rs"], 2),
+            "VWAP Distance %": round((s["price"] / s["vwap"] - 1) * 100, 2),
+            "Breakout": "YES" if s["breakout"] else "NO",
+            "Breakout Age": s["breakout_age"],
+            "5-Bar Move %": round(s["extension"], 2),
+            "Why Score?": ", ".join(s["reasons"]),
+            "Risks": ", ".join(s["risks"]) if s["risks"] else "None"
+        })
+
+    out = pd.DataFrame(results)
+    if not out.empty:
+        out = out.sort_values(
+            ["Score", "RVOL", "Relative Strength"],
+            ascending=[False, False, False]
+        )
+    return out, market_info
+
+# ============================================================
+# BACKTEST ENGINE
+# ============================================================
+
+def backtest_stock(ticker, raw_df, nifty_raw):
+    """
+    Event-driven backtest.
+
+    Signal is evaluated at the CLOSE of b
