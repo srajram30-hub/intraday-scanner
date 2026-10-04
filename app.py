@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -641,11 +640,6 @@ def run_live_scan(stock_data, nifty):
 # ============================================================
 
 def backtest_stock(ticker, raw_df, nifty_raw):
-    df = calculate_indicators(raw_df)
-    nifty = prepare_nifty(nifty_raw)
-
-    if df.empty or nifty.empty or len(df) < 50:
-    def backtest_stock(ticker, raw_df, nifty_raw):
     df = calculate_indicators(raw_df)
     nifty = prepare_nifty(nifty_raw)
 
@@ -1357,4 +1351,23 @@ with backtest_tab:
             st.subheader("📒 Complete Trade Log")
 
             st.dataframe(
-         
+                trades,
+                use_container_width=True,
+                hide_index=True
+            )
+
+            st.download_button(
+                "⬇️ Download Backtest Trade Log",
+                trades.to_csv(index=False).encode("utf-8"),
+                "intraday_pulse_v4_backtest_trades.csv",
+                "text/csv",
+                use_container_width=True
+            )
+
+            st.warning(
+                "This is a research backtest, not proof of future "
+                "profitability. Yahoo 15-minute OHLC data can differ "
+                "from broker/exchange data. The test also excludes "
+                "brokerage, STT, GST, exchange charges, slippage, "
+                "spread, order rejection and liquidity effects."
+            )
