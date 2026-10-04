@@ -7,7 +7,7 @@ import streamlit as st
 import yfinance as yf
 
 # ============================================================
-# INTRADAY PULSE — v7 (Reduced Target Edition - Target R = 1.0)
+# INTRADAY PULSE — v8 (Bi-Directional Long/Short & 3-Way Regime Filter)
 # ============================================================
 
 st.set_page_config(page_title="Intraday Pulse", page_icon="⚡", layout="wide",
@@ -22,26 +22,26 @@ def _ver(v):
 
 STRETCH = {"width": "stretch"} if _ver(st.__version__) >= (1, 50) else {"use_container_width": True}
 
-# ---------------- Parameters (Reduced Target for Higher Win Rate) ----------------
+# ---------------- Parameters ----------------
 MIN_SCORE = 65
 STRONG_SCORE = 80
 RVOL_THRESHOLD = 1.20
 MAX_EXTENSION = 3.0
 DATA_DAYS = 59
 HOLDING_BARS = 8
-TARGET_R = 1.0                 # Reduced target (1.0R) for faster, higher-probability fills
+TARGET_R = 1.2
 BACKTEST_SCORE = 80
-ENTRY_BUFFER = 0.0005          # Minimal buffer above pullback resumption trigger
-SKIP_OPEN_BARS = 3             # Wait 45 mins for opening volatility to settle
-LAST_SIGNAL_TIME = "14:15"     # Stop taking new intraday pullbacks by 2:15 PM
+ENTRY_BUFFER = 0.0005
+SKIP_OPEN_BARS = 3
+LAST_SIGNAL_TIME = "14:15"
 COOLDOWN_BARS = 3
-MIN_DAILY_TURNOVER = 5e7       # Rs 5 crore prior-day liquidity filter
+MIN_DAILY_TURNOVER = 5e7
 SLIPPAGE_PCT = 0.05
 COST_ROUND_TRIP_PCT = 0.10
 OOS_FRACTION = 0.30
 MAX_CONCURRENT_POSITIONS = 4
-RISK_PER_TRADE_PCT = 0.5       # % capital risked per trade
-DAILY_LOSS_LIMIT_R = 3.0       # Circuit breaker after -3R day
+RISK_PER_TRADE_PCT = 0.5
+DAILY_LOSS_LIMIT_R = 3.0
 
 MASTER_WATCHLIST = [
     "HFCL.NS", "RBLBANK.NS", "CUB.NS", "SAILIFE.NS", "AEGISLOG.NS",
@@ -144,7 +144,7 @@ def download_nifty(days):
     raise RuntimeError("Could not download NIFTY (^NSEI) data.")
 
 # ============================================================
-# INDICATORS & PULLBACK SETUP LOGIC
+# INDICATORS & BI-DIRECTIONAL PULLBACK LOGIC
 # ============================================================
 
 def calculate_indicators(raw):
@@ -176,19 +176,27 @@ def calculate_indicators(raw):
     df["VWAP"] = (tp * df["Volume"]).groupby(df["Date"]).cumsum() / \
         df["Volume"].groupby(df["Date"]).cumsum().replace(0, np.nan)
 
+    # --- LONG PULLBACK SETUP ---
     df["InUptrend"] = (df["Close"] > df["EMA20"]) & (df["Close"] > df["VWAP"])
-    
     df["Previous20High"] = df["High"].rolling(20).max().shift(1)
     df["RecentBreakout"] = (df["High"].rolling(15).max() > df["Previous20High"])
-
-    near_vwap = (df["Low"].rolling(3).min() <= df["VWAP"] * 1.005)
-    near_ema = (df["Low"].rolling(3).min() <= df["EMA20"] * 1.005)
-    df["InPullbackZone"] = near_vwap | near_ema
-
+    near_vwap_l = (df["Low"].rolling(3).min() <= df["VWAP"] * 1.005)
+    near_ema_l = (df["Low"].rolling(3).min() <= df["EMA20"] * 1.005)
+    df["InPullbackZoneLong"] = near_vwap_l | near_ema_l
     df["GreenBar"] = df["Close"] > df["Open"]
-    df["ResumptionTrigger"] = df["GreenBar"] & (df["Close"] > df["High"].shift(1))
+    df["LongResumption"] = df["GreenBar"] & (df["Close"] > df["High"].shift(1))
+    df["LongSignal"] = df["InUptrend"] & df["RecentBreakout"] & df["InPullbackZoneLong"] & df["LongResumption"]
 
-    df["PullbackSignal"] = df["InUptrend"] & df["RecentBreakout"] & df["InPullbackZone"] & df["ResumptionTrigger"]
+    # --- SHORT PULLBACK SETUP ---
+    df["InDowntrend"] = (df["Close"] < df["EMA20"]) & (df["Close"] < df["VWAP"])
+    df["Previous20Low"] = df["Low"].rolling(20).min().shift(1)
+    df["RecentBreakdown"] = (df["Low"].rolling(15).min() < df["Previous20Low"])
+    near_vwap_s = (df["High"].rolling(3).max() >= df["VWAP"] * 0.995)
+    near_ema_s = (df["High"].rolling(3).max() >= df["EMA20"] * 0.995)
+    df["InPullbackZoneShort"] = near_vwap_s | near_ema_s
+    df["RedBar"] = df["Close"] < df["Open"]
+    df["ShortResumption"] = df["RedBar"] & (df["Close"] < df["Low"].shift(1))
+    df["ShortSignal"] = df["InDowntrend"] & df["RecentBreakdown"] & df["InPullbackZoneShort"] & df["ShortResumption"]
 
     df["BarTime"] = df.index.strftime("%H:%M")
     ref = df.groupby("BarTime")["Volume"].transform(
@@ -204,32 +212,37 @@ def prepare_nifty(raw):
     n = calculate_indicators(raw)
     if n.empty:
         return n
-    n["MScore"] = (n["Close"] > n["EMA20"]).astype(int) * 5 + (n["Close"] > n["DayOpen"]).astype(int) * 5
+    # Regime scoring for Nifty
+    price = n["Close"]
+    ema = n["EMA20"]
+    vwap = n["VWAP"]
+    
+    # 3-way regime classification per bar
+    # Bullish: price > EMA20 and price > VWAP
+    # Bearish: price < EMA20 and price < VWAP
+    # Choppy: otherwise (sideways / straddling EMA20)
+    regimes = []
+    for c, e, v in zip(price, ema, vwap):
+        if pd.isna(c) or pd.isna(e) or pd.isna(v):
+            regimes.append("🟡 CHOPPY")
+        elif c > e and c > v:
+            regimes.append("🟢 BULLISH")
+        elif c < e and c < v:
+            regimes.append("🔴 BEARISH")
+        else:
+            regimes.append("🟡 CHOPPY")
+    n["MarketRegime"] = regimes
+    n["MScore"] = (n["MarketRegime"] == "🟢 BULLISH").astype(int) * 10 - (n["MarketRegime"] == "🔴 BEARISH").astype(int) * 10
     return n
 
 
-def regime_label(score):
-    return "🟢 BULLISH" if score >= 10 else "🟡 NEUTRAL" if score >= 5 else "🔴 BEARISH"
+def get_market_regime(nifty_ind):
+    if nifty_ind.empty:
+        return "🟡 CHOPPY"
+    return nifty_ind["MarketRegime"].iloc[-1]
 
 
-def components(df):
-    c = df
-    return [
-        ("Above EMA20 & VWAP", c["InUptrend"], 15, "Below trend benchmarks"),
-        ("Recent Breakout Context", c["RecentBreakout"], 15, "No recent breakout structure"),
-        ("Value Pullback to VWAP/EMA20", c["InPullbackZone"], 15, "No pullback to support"),
-        ("Trend Resumption Trigger", c["ResumptionTrigger"], 10, "No resumption candle"),
-        (f"Volume Expansion (RVOL >= {RVOL_THRESHOLD})", c["RVOL"] >= RVOL_THRESHOLD, 10, "Low volume"),
-        ("Healthy RSI (50-70)", c["RSI"].between(50, 70), 10, "RSI outside optimal zone"),
-        ("RSI Rising", c["RSIRising"], 5, "RSI falling"),
-        ("Positive RS vs NIFTY", c["RS"] >= 0.5, 10, "Weak RS"),
-        ("Supportive Market Regime", c["MScore"] >= 5, 10, "Bearish market"),
-    ]
-
-MAX_RAW = 100
-
-
-def build_frame(raw, nifty_ind):
+def build_frame(raw, nifty_ind, mode="AUTO"):
     df = calculate_indicators(raw)
     if df.empty:
         return pd.DataFrame()
@@ -240,42 +253,64 @@ def build_frame(raw, nifty_ind):
     if not df["Liquid"].any():
         return pd.DataFrame()
 
-    nf = nifty_ind[["Return5", "MScore"]].reindex(df.index, method="ffill")
+    nf = nifty_ind[["Return5", "MarketRegime"]].reindex(df.index, method="ffill")
     df["RS"] = df["Return5"] - nf["Return5"]
-    df["MScore"] = nf["MScore"]
+    df["Regime"] = nf["MarketRegime"]
 
-    raw_pts = sum(pts * m.astype(int) for _, m, pts, _ in components(df))
-    df["Score"] = raw_pts.round().astype(int)
+    # Determine active signal based on mode and regime
+    if mode == "🟢 BULLISH (Longs Only)":
+        df["Signal"] = df["LongSignal"]
+        df["Direction"] = "LONG"
+    elif mode == "🔴 BEARISH (Shorts Only)":
+        df["Signal"] = df["ShortSignal"]
+        df["Direction"] = "SHORT"
+    elif mode == "🟡 CHOPPY (Sit Out)":
+        df["Signal"] = False
+        df["Direction"] = "NONE"
+    else:  # AUTO
+        # If market regime is bullish, look for longs; if bearish, look for shorts; if choppy, no signal
+        df["Direction"] = np.where(df["Regime"] == "🟢 BULLISH", "LONG",
+                           np.where(df["Regime"] == "🔴 BEARISH", "SHORT", "NONE"))
+        df["Signal"] = np.where(df["Direction"] == "LONG", df["LongSignal"],
+                       np.where(df["Direction"] == "SHORT", df["ShortSignal"], False))
 
-    need = ["EMA20", "VWAP", "RSI", "ATR", "RVOL", "Return5", "RS", "MScore"]
-    df["Valid"] = df[need].notna().all(axis=1) & (df["BarNo"] >= SKIP_OPEN_BARS) & df["Liquid"]
-    df["InWindow"] = df["BarTime"] <= LAST_SIGNAL_TIME
-    df["Signal"] = df["Valid"] & df["PullbackSignal"] & df["InWindow"]
+    df["Score"] = 85  # Standard score for valid pullback setups matching direction
+    need = ["EMA20", "VWAP", "RSI", "ATR", "RVOL", "Return5", "RS"]
+    df["Valid"] = df[need].notna().all(axis=1) & (df["BarNo"] >= SKIP_OPEN_BARS) & df["Liquid"] & (df["BarTime"] <= LAST_SIGNAL_TIME)
+    df["FinalSignal"] = df["Valid"] & df["Signal"]
     return df
 
 
-def trade_levels(df, i, entry, atr):
-    swing_low = float(df["Low"].iloc[max(0, i - 2):i + 1].min())
-    stop = min(swing_low - 0.1 * atr, entry - 1.0 * atr)
-    stop = min(stop, entry * 0.995)
-    risk = entry - stop
-    return float(stop), float(entry + TARGET_R * risk), float(risk)
+def trade_levels(direction, df, i, entry, atr):
+    if direction == "LONG":
+        swing_low = float(df["Low"].iloc[max(0, i - 2):i + 1].min())
+        stop = min(swing_low - 0.1 * atr, entry - 1.0 * atr)
+        stop = min(stop, entry * 0.995)
+        risk = entry - stop
+        target = entry + TARGET_R * risk
+    else:  # SHORT
+        swing_high = float(df["High"].iloc[max(0, i - 2):i + 1].max())
+        stop = max(swing_high + 0.1 * atr, entry + 1.0 * atr)
+        stop = max(stop, entry * 1.005)
+        risk = stop - entry
+        target = entry - TARGET_R * risk
+    return float(stop), float(target), float(risk)
 
 # ============================================================
 # LIVE SCAN
 # ============================================================
 
-def run_live_scan(stock_data, nifty_raw):
+def run_live_scan(stock_data, nifty_raw, mode):
     nifty_ind = prepare_nifty(nifty_raw)
     if nifty_ind.empty:
         raise RuntimeError("Not enough NIFTY data.")
     asof = nifty_ind.index[-1]
-    ms = int(nifty_ind["MScore"].iloc[-1])
-    market_info = {"score": ms, "regime": regime_label(ms), "asof": asof}
+    current_regime = get_market_regime(nifty_ind)
+    market_info = {"regime": current_regime, "asof": asof}
 
     rows, skipped = [], []
     for ticker, raw in stock_data.items():
-        df = build_frame(raw, nifty_ind)
+        df = build_frame(raw, nifty_ind, mode)
         if df.empty:
             skipped.append(ticker)
             continue
@@ -286,72 +321,79 @@ def run_live_scan(stock_data, nifty_raw):
             skipped.append(ticker)
             continue
 
-        comps = components(df)
-        reasons = [lab for lab, m, _, _ in comps if bool(m.iloc[-1])]
-        risks = [rl for _, m, _, rl in comps if not bool(m.iloc[-1])]
-        if not last["InWindow"]:
-            risks.append(f"After {LAST_SIGNAL_TIME}: no new entries")
+        direction = last["Direction"]
+        is_signal = bool(last["FinalSignal"])
 
-        score = int(last["Score"])
-        if last["Signal"] and score >= STRONG_SCORE:
-            status = "🟢 ENTER PULLBACK"
-        elif last["Signal"] and score >= MIN_SCORE:
-            status = "🟡 WATCH PULLBACK"
+        if is_signal and direction == "LONG":
+            status = "🟢 ENTER LONG PULLBACK"
+        elif is_signal and direction == "SHORT":
+            status = "🔴 ENTER SHORT PULLBACK"
         else:
-            status = "🔴 AVOID"
+            status = "⚪ NO SETUP / CHOP"
 
         close = float(last["Close"])
-        trigger = close * (1 + ENTRY_BUFFER)
-        stop, target, risk = trade_levels(df, i, trigger, float(last["ATR"]))
+        trigger = close * (1 + ENTRY_BUFFER) if direction == "LONG" else close * (1 - ENTRY_BUFFER)
+        stop, target, risk = trade_levels(direction, df, i, trigger, float(last["ATR"]))
         prev_days = df.loc[df["Date"] < last["Date"], "Close"]
         change = (close / float(prev_days.iloc[-1]) - 1) * 100 if len(prev_days) else np.nan
 
         rows.append({
-            "Stock": ticker.replace(".NS", ""), "Score": score, "Status": status,
+            "Stock": ticker.replace(".NS", ""), "Direction": direction, "Status": status,
             "Price": round(close, 2), "Change % (day)": round(change, 2),
-            "Pullback Trigger": round(trigger, 2), "Stop Loss": round(stop, 2),
+            "Trigger": round(trigger, 2), "Stop Loss": round(stop, 2),
             "Target": round(target, 2), "Risk/Share": round(risk, 2), "R:R": TARGET_R,
             "RSI": round(float(last["RSI"]), 1), "RVOL": round(float(last["RVOL"]), 2),
             "RS vs NIFTY": round(float(last["RS"]), 2),
-            "VWAP Dist %": round((close / float(last["VWAP"]) - 1) * 100, 2),
-            "Why Score?": ", ".join(reasons), "Risks": ", ".join(risks) or "None",
+            "Market Regime": last["Regime"],
         })
 
     out = pd.DataFrame(rows)
     if not out.empty:
-        out = out.sort_values(["Score", "RVOL", "RS vs NIFTY"], ascending=False).reset_index(drop=True)
+        out = out.sort_values(["RVOL", "RS vs NIFTY"], ascending=False).reset_index(drop=True)
     return out, market_info, sorted(skipped)
 
 # ============================================================
-# PORTFOLIO BACKTEST
+# PORTFOLIO BACKTEST (Bi-Directional Simulation)
 # ============================================================
 
 def collect_signals(ticker, df):
-    o, h = df["Open"].values, df["High"].values
-    c, atr, dates = df["Close"].values, df["ATR"].values, df["Date"].values
-    sig = (df["Signal"] & (df["Score"] >= BACKTEST_SCORE)).values
+    o, h, l, c = df["Open"].values, df["High"].values, df["Low"].values, df["Close"].values
+    atr, dates = df["ATR"].values, df["Date"].values
+    sig = df["FinalSignal"].values
+    direction_arr = df["Direction"].values
     n, out = len(df), []
+
     for i in range(30, n - 1):
         if not sig[i]:
             continue
         j = i + 1
         if dates[j] != dates[i]:
             continue
-        trigger = c[i] * (1 + ENTRY_BUFFER)
-        if o[j] >= trigger:
-            fill = o[j]
-        elif h[j] >= trigger:
-            fill = trigger
+        direction = direction_arr[i]
+        
+        if direction == "LONG":
+            trigger = c[i] * (1 + ENTRY_BUFFER)
+            if o[j] >= trigger: fill = o[j]
+            elif h[j] >= trigger: fill = trigger
+            else: continue
+            fill *= 1 + SLIPPAGE_PCT / 100
+        elif direction == "SHORT":
+            trigger = c[i] * (1 - ENTRY_BUFFER)
+            if o[j] <= trigger: fill = o[j]
+            elif l[j] <= trigger: fill = trigger
+            else: continue
+            fill *= 1 - SLIPPAGE_PCT / 100
         else:
             continue
-        fill *= 1 + SLIPPAGE_PCT / 100
-        stop, target, risk = trade_levels(df, i, fill, atr[i])
+
+        stop, target, risk = trade_levels(direction, df, i, fill, atr[i])
         k_end = j
         while k_end < n - 1 and k_end - j + 1 < HOLDING_BARS and dates[k_end + 1] == dates[j]:
             k_end += 1
-        out.append({"ticker": ticker.replace(".NS", ""), "signal_time": df.index[i],
-                    "entry_time": df.index[j], "entry_idx": j, "k_end": k_end,
-                    "score": int(df["Score"].iloc[i]), "fill": fill, "stop": stop,
+
+        out.append({"ticker": ticker.replace(".NS", ""), "direction": direction,
+                    "signal_time": df.index[i], "entry_time": df.index[j],
+                    "entry_idx": j, "k_end": k_end, "fill": fill, "stop": stop,
                     "target": target, "risk": risk, "df": df, "raw_i": i})
     return out
 
@@ -359,40 +401,44 @@ def collect_signals(ticker, df):
 def simulate_trade(sig):
     df, j, k_end = sig["df"], sig["entry_idx"], sig["k_end"]
     stop, target, fill, risk = sig["stop"], sig["target"], sig["fill"], sig["risk"]
+    direction = sig["direction"]
     o, h, l, c = (df[k].values for k in ["Open", "High", "Low", "Close"])
 
     exit_price = reason = None
     exit_k = k_end
+
     for k in range(j, k_end + 1):
-        if k > j and o[k] <= stop:
-            exit_price, reason, exit_k = o[k], "GAP_STOP", k
-            break
-        if h[k] >= target:
-            exit_price, reason, exit_k = target, "TARGET", k
-            break
-        if l[k] <= stop:
-            exit_price, exit_k = stop, k
-            reason = "STOP"
-            break
+        if direction == "LONG":
+            if k > j and o[k] <= stop: exit_price, reason, exit_k = o[k], "GAP_STOP", k; break
+            if h[k] >= target: exit_price, reason, exit_k = target, "TARGET", k; break
+            if l[k] <= stop: exit_price, exit_k = stop, k; reason = "STOP"; break
+        else: # SHORT
+            if k > j and o[k] >= stop: exit_price, reason, exit_k = o[k], "GAP_STOP", k; break
+            if l[k] <= target: exit_price, reason, exit_k = target, "TARGET", k; break
+            if h[k] >= stop: exit_price, exit_k = stop, k; reason = "STOP"; break
 
     if exit_price is None:
         exit_price = c[k_end]
         reason = "TIME_EXIT" if k_end - j + 1 >= HOLDING_BARS else "EOD_EXIT"
-    if reason != "TARGET":
-        exit_price *= 1 - SLIPPAGE_PCT / 100
+    
+    if direction == "LONG":
+        if reason != "TARGET": exit_price *= 1 - SLIPPAGE_PCT / 100
+        pnl = exit_price - fill - fill * COST_ROUND_TRIP_PCT / 100
+    else:
+        if reason != "TARGET": exit_price *= 1 + SLIPPAGE_PCT / 100
+        pnl = fill - exit_price - fill * COST_ROUND_TRIP_PCT / 100
 
-    pnl = exit_price - fill - fill * COST_ROUND_TRIP_PCT / 100
     return exit_price, reason, exit_k, pnl, (pnl / risk if risk > 0 else 0.0)
 
 
-def run_full_backtest(tickers, days):
+def run_full_backtest(tickers, days, mode):
     stock_data, dl_errors = download_market_data(tickers, days)
     nifty_ind = prepare_nifty(download_nifty(days))
     errors, skipped, signals = list(dl_errors), [], []
 
     for ticker, raw in stock_data.items():
         try:
-            df = build_frame(raw, nifty_ind)
+            df = build_frame(raw, nifty_ind, mode)
             if df.empty:
                 skipped.append(ticker)
                 continue
@@ -400,7 +446,7 @@ def run_full_backtest(tickers, days):
         except Exception:
             errors.append(ticker)
 
-    signals.sort(key=lambda s: (s["entry_time"], -s["score"]))
+    signals.sort(key=lambda s: s["entry_time"])
 
     active, trades, cooldown, day_book = [], [], {}, {}
     for sig in signals:
@@ -424,16 +470,14 @@ def run_full_backtest(tickers, days):
 
         row = df.iloc[sig["raw_i"]]
         trades.append({
-            "Stock": tk, "Signal Time": sig["signal_time"], "Entry Time": et, "Exit Time": exit_time,
-            "Score": sig["score"], "Entry": round(sig["fill"], 2), "Stop": round(sig["stop"], 2),
-            "Target": round(sig["target"], 2), "Exit": round(exit_price, 2),
+            "Stock": tk, "Direction": sig["direction"], "Signal Time": sig["signal_time"],
+            "Entry Time": et, "Exit Time": exit_time, "Entry": round(sig["fill"], 2),
+            "Stop": round(sig["stop"], 2), "Target": round(sig["target"], 2), "Exit": round(exit_price, 2),
             "Risk %": round(sig["risk"] / sig["fill"] * 100, 2), "R (net)": round(r, 3),
             "P&L/Share (net)": round(pnl, 2),
             "Outcome": "WIN" if r > 0 else "LOSS" if r < 0 else "BREAKEVEN",
             "Exit Reason": reason, "Bars Held": exit_k - j + 1,
-            "RSI": round(float(row["RSI"]), 1), "RVOL": round(float(row["RVOL"]), 2),
-            "RS vs NIFTY": round(float(row["RS"]), 2),
-            "Market": regime_label(int(row["MScore"])),
+            "Market Regime": row["Regime"],
         })
 
     out = pd.DataFrame(trades)
@@ -446,8 +490,7 @@ def run_full_backtest(tickers, days):
 # ============================================================
 
 def wilson_ci(wins, n, z=1.96):
-    if n == 0:
-        return 0.0, 0.0
+    if n == 0: return 0.0, 0.0
     p = wins / n
     d = 1 + z * z / n
     centre = (p + z * z / (2 * n)) / d
@@ -460,8 +503,7 @@ def daily_r(trades):
 
 
 def calculate_backtest_stats(trades):
-    if trades.empty:
-        return {}
+    if trades.empty: return {}
     t = trades.sort_values("Exit Time")
     r, n = t["R (net)"], len(t)
     wins, losses = int((r > 0).sum()), int((r < 0).sum())
@@ -507,23 +549,33 @@ def split_stats(trades):
     cols = {}
     for name, part in parts.items():
         s = calculate_backtest_stats(part)
-        if s:
-            cols[name] = {k: _fmt(v) for k, v in s.items()}
+        if s: cols[name] = {k: _fmt(v) for k, v in s.items()}
     return pd.DataFrame(cols)
 
 
 st.markdown("# ⚡ Intraday Pulse")
-st.caption("Reduced Target Edition (Target R = 1.0). Research tool only, not investment advice.")
+st.caption("Bi-Directional & 3-Way Market Regime Edition. Research tool only.")
+
+# Market Mode Filter Selector
+market_mode = st.selectbox(
+    "🌐 Market Filter Mode (Select Regime Strategy)",
+    [
+        "🌐 AUTO (Follow Nifty Regime: Long in Bull, Short in Bear, Sit out in Chop)",
+        "🟢 BULLISH (Longs Only)",
+        "🔴 BEARISH (Shorts Only)",
+        "🟡 CHOPPY (Sit Out / No Trades)"
+    ]
+)
 
 scan_tab, backtest_tab = st.tabs(["🚀 Live Scanner", "📈 Backtest"])
 
 with scan_tab:
-    if st.button("🚀 Run Instant Market Scan", type="primary", key="scan", **STRETCH):
+    if st.button("🚀 Run Bi-Directional Scan", type="primary", key="scan", **STRETCH):
         try:
-            with st.spinner(f"Scanning {len(MASTER_WATCHLIST)} stocks for reduced-target setups..."):
+            with st.spinner(f"Scanning {len(MASTER_WATCHLIST)} stocks under mode: {market_mode[:15]}..."):
                 stock_data, dl_errors = download_market_data(tuple(MASTER_WATCHLIST), DATA_DAYS)
                 nifty = download_nifty(DATA_DAYS)
-                results, market_info, skipped = run_live_scan(stock_data, nifty)
+                results, market_info, skipped = run_live_scan(stock_data, nifty, market_mode)
             st.session_state.update(live_results=results, market_info=market_info,
                                     live_errors=dl_errors, live_skipped=skipped,
                                     scan_time=datetime.now())
@@ -531,44 +583,43 @@ with scan_tab:
             st.error(f"Scan failed: {e}")
 
     if "live_results" not in st.session_state:
-        st.info("Tap **Run Instant Market Scan** to scan for setups.")
+        st.info("Select your market mode above and tap **Run Bi-Directional Scan**.")
     else:
         results, mi = st.session_state["live_results"], st.session_state["market_info"]
-        st.markdown(f"### Market Regime: {mi['regime']}")
+        st.markdown(f"### Detected Nifty Regime: {mi['regime']}")
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Watchlist", len(MASTER_WATCHLIST))
         c2.metric("Analysed", len(results))
-        c3.metric("Setups", int((results["Status"] == "🟢 ENTER PULLBACK").sum()) if len(results) else 0)
-        c4.metric("Watch", int((results["Status"] == "🟡 WATCH PULLBACK").sum()) if len(results) else 0)
+        c3.metric("Long Setups", int((results["Direction"] == "LONG").sum()) if len(results) else 0)
+        c4.metric("Short Setups", int((results["Direction"] == "SHORT").sum()) if len(results) else 0)
 
         if results.empty:
-            st.warning("No setups found matching criteria.")
+            st.warning("No setups match the current bi-directional filter.")
         else:
             st.dataframe(results, hide_index=True, **STRETCH)
             st.download_button("⬇️ Download Results CSV", results.to_csv(index=False).encode("utf-8"),
-                               "reduced_target_scan.csv", "text/csv", **STRETCH)
+                               "bidirectional_scan.csv", "text/csv", **STRETCH)
 
 with backtest_tab:
-    st.subheader("📈 Reduced Target Strategy Backtest")
+    st.subheader("📈 Bi-Directional Portfolio Backtest")
     st.warning(
         f"Net of costs ({COST_ROUND_TRIP_PCT}% round trip + {SLIPPAGE_PCT}% slippage per side). "
-        f"Max {MAX_CONCURRENT_POSITIONS} concurrent positions, {RISK_PER_TRADE_PCT}% capital risked per trade, "
-        f"Target R: {TARGET_R} (1:1 risk-to-reward).")
+        f"Active mode: {market_mode}. Long & Short pullback engines enabled.")
 
-    if st.button("📊 Run Backtest", type="primary", key="bt", **STRETCH):
+    if st.button("📊 Run Bi-Directional Backtest", type="primary", key="bt", **STRETCH):
         try:
-            with st.spinner("Running portfolio simulation with 1.0R target..."):
-                trades, errors, skipped = run_full_backtest(tuple(MASTER_WATCHLIST), DATA_DAYS)
+            with st.spinner("Running bi-directional portfolio simulation..."):
+                trades, errors, skipped = run_full_backtest(tuple(MASTER_WATCHLIST), DATA_DAYS, market_mode)
             st.session_state.update(backtest_trades=trades, bt_errors=errors, bt_skipped=skipped)
         except Exception as e:
             st.error(f"Backtest failed: {e}")
 
     if "backtest_trades" not in st.session_state:
-        st.info("Tap **Run Backtest** to measure performance.")
+        st.info("Tap **Run Bi-Directional Backtest** to measure performance.")
     else:
         trades = st.session_state["backtest_trades"]
         if trades.empty:
-            st.error("No historical trades matched the rules.")
+            st.error("No historical trades matched the rules under this mode.")
         else:
             s = calculate_backtest_stats(trades)
             m = st.columns(4)
@@ -592,4 +643,4 @@ with backtest_tab:
             st.subheader("📒 Trade Log")
             st.dataframe(trades, hide_index=True, **STRETCH)
             st.download_button("⬇️ Download Trade Log CSV", trades.to_csv(index=False).encode("utf-8"),
-                               "reduced_target_backtest_log.csv", "text/csv", **STRETCH)
+                               "bidirectional_backtest_log.csv", "text/csv", **STRETCH)
