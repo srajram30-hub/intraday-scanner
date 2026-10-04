@@ -7,10 +7,10 @@ import streamlit as st
 import yfinance as yf
 
 # ============================================================
-# INTRADAY PULSE — DAILY SWING EDITION (Higher Highs / Lower Lows)
+# INTRADAY PULSE — EOD DAILY BREAKOUT & BREAKDOWN EDITION
 # ============================================================
 
-st.set_page_config(page_title="Daily Swing Pulse", page_icon="📈", layout="wide",
+st.set_page_config(page_title="EOD Daily Pulse", page_icon="⚡", layout="wide",
                    initial_sidebar_state="collapsed")
 
 IST = "Asia/Kolkata"
@@ -22,17 +22,15 @@ def _ver(v):
 
 STRETCH = {"width": "stretch"} if _ver(st.__version__) >= (1, 50) else {"use_container_width": True}
 
-# ---------------- Daily Swing Parameters ----------------
-DATA_PERIOD = "2y"             # 2 years of daily data for robust swing backtesting
-EMA_TREND = 20                 # Daily 20 EMA baseline
-HOLDING_DAYS = 15              # Max swing holding days
+# ---------------- Daily Parameters ----------------
+DATA_PERIOD = "1y"             # 1 year of daily data
 TARGET_R = 2.0                 # 2:1 Reward-to-Risk target for daily swings
-BACKTEST_SCORE = 75
-SLIPPAGE_PCT = 0.05            # Daily slippage is minimal
-COST_ROUND_TRIP_PCT = 0.15     # Delivery / Swing brokerage + STT estimate
+HOLDING_DAYS = 10              # Max days held
+SLIPPAGE_PCT = 0.05
+COST_ROUND_TRIP_PCT = 0.15     # Swing brokerage + STT
 OOS_FRACTION = 0.30
 MAX_CONCURRENT_POSITIONS = 5
-RISK_PER_TRADE_PCT = 1.0       # 1% capital risked per swing trade
+RISK_PER_TRADE_PCT = 1.0
 
 MASTER_WATCHLIST = [
     "HFCL.NS", "RBLBANK.NS", "CUB.NS", "SAILIFE.NS", "AEGISLOG.NS",
@@ -70,7 +68,7 @@ MASTER_WATCHLIST = [
 ]
 
 # ============================================================
-# DATA DOWNLOAD (Daily Interval)
+# DATA DOWNLOAD (Daily)
 # ============================================================
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -97,9 +95,8 @@ def download_daily_data(tickers, period):
                             continue
                     else:
                         df = data.copy()
-                    
                     df = df.dropna(subset=["Close"])
-                    if len(df) >= 100:
+                    if len(df) >= 50:
                         all_data[t] = df
                     else:
                         errors.append(t)
@@ -111,15 +108,15 @@ def download_daily_data(tickers, period):
     return all_data, sorted(set(errors))
 
 # ============================================================
-# DAILY INDICATORS & MARKET STRUCTURE (HH / HL / LL / LH)
+# INDICATORS & YESTERDAY HIGH / LOW CROSS LOGIC
 # ============================================================
 
 def calculate_daily_indicators(raw):
     df = raw[["Open", "High", "Low", "Close", "Volume"]].apply(pd.to_numeric, errors="coerce").dropna()
-    if len(df) < 50:
+    if len(df) < 30:
         return pd.DataFrame()
 
-    df["EMA20"] = df["Close"].ewm(span=EMA_TREND, adjust=False).mean()
+    df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
 
     delta = df["Close"].diff()
     gain = delta.clip(lower=0).ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
@@ -132,80 +129,49 @@ def calculate_daily_indicators(raw):
                     (df["Low"] - prev_close).abs()], axis=1).max(axis=1)
     df["ATR"] = tr.ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
 
-    # --- MARKET STRUCTURE: Higher Highs / Higher Lows & Lower Lows / Lower Highs ---
-    # Rolling 5-day local peaks and troughs
-    df["SwingHigh"] = df["High"].rolling(5, center=True).max()
-    df["SwingLow"] = df["Low"].rolling(5, center=True).min()
-    
-    # Forward fill swing levels for trend classification
-    df["PrevSwingHigh"] = df["SwingHigh"].shift(5)
-    df["PrevSwingLow"] = df["SwingLow"].shift(5)
+    # --- YESTERDAY'S HIGH / LOW PARAMETERS ---
+    df["YesterdayHigh"] = df["High"].shift(1)
+    df["YesterdayLow"] = df["Low"].shift(1)
 
-    # Structure conditions
-    df["HigherHigh"] = df["High"] > df["PrevSwingHigh"]
-    df["HigherLow"] = df["Low"] > df["PrevSwingLow"]
-    df["LowerLow"] = df["Low"] < df["PrevSwingLow"]
-    df["LowerHigh"] = df["High"] < df["PrevSwingHigh"]
+    # Cross Parameters evaluated at EOD close (3:30 PM)
+    df["CrossedYesterdayHigh"] = df["Close"] > df["YesterdayHigh"]
+    df["CrossedYesterdayLow"] = df["Close"] < df["YesterdayLow"]
 
-    # --- LONG SWING SETUP (Uptrend + Pullback to EMA20 + Resumption) ---
-    df["LongTrend"] = (df["Close"] > df["EMA20"]) & df["HigherHigh"] & df["HigherLow"]
-    near_ema_l = (df["Low"] <= df["EMA20"] * 1.01) & (df["Low"] >= df["EMA20"] * 0.98)
-    df["LongPullback"] = near_ema_l | (df["Low"] <= df["Low"].rolling(3).min() * 1.005)
-    df["LongResumption"] = (df["Close"] > df["Open"]) & (df["Close"] > df["High"].shift(1))
-    df["LongSignal"] = df["LongTrend"] & df["LongPullback"] & df["LongResumption"]
-
-    # --- SHORT SWING SETUP (Downtrend + Rally to EMA20 resistance + Resumption) ---
-    df["ShortTrend"] = (df["Close"] < df["EMA20"]) & df["LowerLow"] & df["LowerHigh"]
-    near_ema_s = (df["High"] >= df["EMA20"] * 0.99) & (df["High"] <= df["EMA20"] * 1.02)
-    df["ShortPullback"] = near_ema_s | (df["High"] >= df["High"].rolling(3).max() * 0.995)
-    df["ShortResumption"] = (df["Close"] < df["Open"]) & (df["Close"] < df["Low"].shift(1))
-    df["ShortSignal"] = df["ShortTrend"] & df["ShortPullback"] & df["ShortResumption"]
+    # Trend filter
+    df["LongSetup"] = df["CrossedYesterdayHigh"] & (df["Close"] > df["EMA20"])
+    df["ShortSetup"] = df["CrossedYesterdayLow"] & (df["Close"] < df["EMA20"])
 
     return df
 
 
-def build_daily_frame(raw, mode):
-    df = calculate_daily_indicators(raw)
+def build_daily_frame(raw):
+    df = calculate_indicators(raw)
     if df.empty:
         return pd.DataFrame()
-
-    if mode == "🟢 BULLISH (Long Swings Only)":
-        df["Signal"] = df["LongSignal"]
-        df["Direction"] = "LONG"
-    elif mode == "🔴 BEARISH (Short Swings Only)":
-        df["Signal"] = df["ShortSignal"]
-        df["Direction"] = "SHORT"
-    else:
-        df["Signal"] = False
-        df["Direction"] = "NONE"
-
-    df["Score"] = 80
-    need = ["EMA20", "RSI", "ATR"]
-    df["Valid"] = df[need].notna().all(axis=1) & df["Signal"]
+    need = ["EMA20", "RSI", "ATR", "YesterdayHigh", "YesterdayLow"]
+    df["Valid"] = df[need].notna().all(axis=1)
     return df
 
 
-def swing_trade_levels(direction, df, i, entry, atr):
+def trade_levels(direction, df, i, entry, atr):
     if direction == "LONG":
-        swing_low = float(df["Low"].iloc[max(0, i - 5):i + 1].min())
-        stop = min(swing_low - 0.2 * atr, entry - 1.5 * atr)
+        stop = min(df["YesterdayLow"].iloc[i], entry - 1.5 * atr)
         risk = entry - stop
         target = entry + TARGET_R * risk
     else:
-        swing_high = float(df["High"].iloc[max(0, i - 5):i + 1].max())
-        stop = max(swing_high + 0.2 * atr, entry + 1.5 * atr)
+        stop = max(df["YesterdayHigh"].iloc[i], entry + 1.5 * atr)
         risk = stop - entry
         target = entry - TARGET_R * risk
     return float(stop), float(target), float(risk)
 
 # ============================================================
-# LIVE SCANNER (Daily)
+# LIVE SCANNER (EOD Daily)
 # ============================================================
 
-def run_daily_scan(stock_data, mode):
+def run_daily_scan(stock_data):
     rows, skipped = [], []
     for ticker, raw in stock_data.items():
-        df = build_daily_frame(raw, mode)
+        df = build_daily_frame(raw)
         if df.empty:
             skipped.append(ticker)
             continue
@@ -215,16 +181,22 @@ def run_daily_scan(stock_data, mode):
             skipped.append(ticker)
             continue
 
-        direction = last["Direction"]
+        if last["LongSetup"]:
+            direction, status = "LONG", "🟢 CROSSED YESTERDAY HIGH (Bullish)"
+        elif last["ShortSetup"]:
+            direction, status = "SHORT", "🔴 CROSSED YESTERDAY LOW (Bearish)"
+        else:
+            continue
+
         close = float(last["Close"])
-        stop, target, risk = swing_trade_levels(direction, df, i, close, float(last["ATR"]))
+        stop, target, risk = trade_levels(direction, df, i, close, float(last["ATR"]))
 
         rows.append({
-            "Stock": ticker.replace(".NS", ""), "Direction": direction,
-            "Close Price": round(close, 2), "Stop Loss": round(stop, 2),
+            "Stock": ticker.replace(".NS", ""), "Direction": direction, "Status": status,
+            "Close Price": round(close, 2), "Yesterday High": round(float(last["YesterdayHigh"]), 2),
+            "Yesterday Low": round(float(last["YesterdayLow"]), 2), "Stop Loss": round(stop, 2),
             "Target": round(target, 2), "Risk/Share": round(risk, 2), "R:R": TARGET_R,
-            "RSI": round(float(last["RSI"]), 1),
-            "Structure": "Higher High / Higher Low" if direction == "LONG" else "Lower Low / Lower High"
+            "RSI": round(float(last["RSI"]), 1)
         })
 
     out = pd.DataFrame(rows)
@@ -233,32 +205,33 @@ def run_daily_scan(stock_data, mode):
     return out, sorted(skipped)
 
 # ============================================================
-# PORTFOLIO BACKTEST (Daily Swing Simulation)
+# PORTFOLIO BACKTEST (EOD Daily Simulation)
 # ============================================================
 
-def run_daily_backtest(tickers, period, mode):
+def run_daily_backtest(tickers, period):
     stock_data, dl_errors = download_daily_data(tickers, period)
     errors, skipped, signals = list(dl_errors), [], []
 
     for ticker, raw in stock_data.items():
         try:
-            df = build_daily_frame(raw, mode)
+            df = build_daily_frame(raw)
             if df.empty:
                 skipped.append(ticker)
                 continue
 
             o, h, l, c = df["Open"].values, df["High"].values, df["Low"].values, df["Close"].values
             atr = df["ATR"].values
-            sig = df["Valid"].values
-            direction = df["Direction"].iloc[0]
+            long_setup = df["LongSetup"].values
+            short_setup = df["ShortSetup"].values
             n = len(df)
 
-            for i in range(50, n - 1):
-                if not sig[i]:
+            for i in range(20, n - 1):
+                if not (long_setup[i] or short_setup[i]):
                     continue
+                direction = "LONG" if long_setup[i] else "SHORT"
                 entry_idx = i + 1
                 entry = o[entry_idx] * (1 + SLIPPAGE_PCT / 100 if direction == "LONG" else 1 - SLIPPAGE_PCT / 100)
-                stop, target, risk = swing_trade_levels(direction, df, i, entry, atr[i])
+                stop, target, risk = trade_levels(direction, df, i, entry, atr[i])
 
                 exit_price = reason = None
                 exit_idx = min(n - 1, entry_idx + HOLDING_DAYS)
@@ -352,31 +325,23 @@ def calculate_stats(trades):
     }
 
 
-st.markdown("# 📈 Daily Swing Pulse")
-st.caption("Daily Candle Swing Trading Edition with Market Structure (Higher Highs / Lower Lows).")
+st.markdown("# ⚡ EOD Daily Pulse")
+st.caption("Daily Close Scan: Checking Yesterday's High / Low Crosses for Next-Day Entry.")
 
-market_mode = st.selectbox(
-    "🌐 Swing Market Direction (Manual Control)",
-    [
-        "🟢 BULLISH (Long Swings Only)",
-        "🔴 BEARISH (Short Swings Only)"
-    ]
-)
-
-scan_tab, backtest_tab = st.tabs(["🚀 EOD Daily Scan", "📈 Swing Backtest"])
+scan_tab, backtest_tab = st.tabs(["🚀 EOD Daily Scan", "📈 Backtest"])
 
 with scan_tab:
-    if st.button("🚀 Run Daily Swing Scan", type="primary", key="scan", **STRETCH):
+    if st.button("🚀 Run EOD Daily Scan", type="primary", key="scan", **STRETCH):
         try:
             with st.spinner(f"Scanning {len(MASTER_WATCHLIST)} daily charts..."):
-                stock_data, dl_errors = download_daily_data(tuple(MASTER_WATCHLIST), DATA_PERIOD)
-                results, skipped = run_daily_scan(stock_data, market_mode)
+                stock_data, dl_errors = download_daily_data(tuple(MASTER_WATCHLIST), DATA_DATA_PERIOD if 'DATA_DATA_PERIOD' in locals() else DATA_PERIOD)
+                results, skipped = run_daily_scan(stock_data)
             st.session_state.update(daily_results=results, daily_skipped=skipped, scan_time=datetime.now())
         except Exception as e:
             st.error(f"Scan failed: {e}")
 
     if "daily_results" not in st.session_state:
-        st.info("Select your market direction above and tap **Run Daily Swing Scan**.")
+        st.info("Tap **Run EOD Daily Scan** to check which stocks crossed yesterday's high or low at today's close.")
     else:
         results = st.session_state["daily_results"]
         c1, c2 = st.columns(2)
@@ -384,30 +349,30 @@ with scan_tab:
         c2.metric("Qualifying Setups", len(results))
 
         if results.empty:
-            st.warning("No daily swing setups match the current structure filter.")
+            st.warning("No stocks crossed yesterday's high/low with trend confirmation today.")
         else:
             st.dataframe(results, hide_index=True, **STRETCH)
-            st.download_button("⬇️ Download Daily Setups CSV", results.to_csv(index=False).encode("utf-8"),
-                               "daily_swing_setups.csv", "text/csv", **STRETCH)
+            st.download_button("⬇️ Download Setups CSV", results.to_csv(index=False).encode("utf-8"),
+                               "eod_daily_setups.csv", "text/csv", **STRETCH)
 
 with backtest_tab:
-    st.subheader("📈 Multi-Day Swing Strategy Backtest")
-    st.warning(f"Simulating daily swing trades over {DATA_PERIOD}. Mode: {market_mode}. Target R: {TARGET_R}.")
+    st.subheader("📈 EOD Strategy Backtest")
+    st.warning("Simulating next-day entries when today's close crosses yesterday's high or low, filtered by 20 EMA trend.")
 
-    if st.button("📊 Run Swing Backtest", type="primary", key="bt", **STRETCH):
+    if st.button("📊 Run EOD Backtest", type="primary", key="bt", **STRETCH):
         try:
-            with st.spinner("Running daily swing simulation..."):
-                trades, errors, skipped = run_daily_backtest(tuple(MASTER_WATCHLIST), DATA_PERIOD, market_mode)
-            st.session_state.update(swing_trades=trades)
+            with st.spinner("Running EOD simulation..."):
+                trades, errors, skipped = run_daily_backtest(tuple(MASTER_WATCHLIST), DATA_PERIOD)
+            st.session_state.update(eod_trades=trades)
         except Exception as e:
             st.error(f"Backtest failed: {e}")
 
-    if "swing_trades" not in st.session_state:
-        st.info("Tap **Run Swing Backtest** to measure multi-day performance.")
+    if "eod_trades" not in st.session_state:
+        st.info("Tap **Run EOD Backtest** to measure performance.")
     else:
-        trades = st.session_state["swing_trades"]
+        trades = st.session_state["eod_trades"]
         if trades.empty:
-            st.error("No historical swing trades matched the rules.")
+            st.error("No historical trades matched the rules.")
         else:
             s = calculate_stats(trades)
             m = st.columns(4)
@@ -426,7 +391,7 @@ with backtest_tab:
             eq = trades.sort_values("exit_date")["R (net)"].cumsum() * RISK_PER_TRADE_PCT
             st.line_chart(pd.DataFrame({"Cumulative return %": eq.values}))
 
-            st.subheader("📒 Swing Trade Log")
+            st.subheader("📒 Trade Log")
             st.dataframe(trades, hide_index=True, **STRETCH)
-            st.download_button("⬇️ Download Swing Log CSV", trades.to_csv(index=False).encode("utf-8"),
-                               "swing_backtest_log.csv", "text/csv", **STRETCH)
+            st.download_button("⬇️ Download Trade Log CSV", trades.to_csv(index=False).encode("utf-8"),
+                               "eod_backtest_log.csv", "text/csv", **STRETCH)
