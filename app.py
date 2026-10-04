@@ -6,7 +6,7 @@ from datetime import datetime
 import time
 
 # ============================================================
-# INTRADAY PULSE V4 — STREAMLINED PRODUCTION VERSION
+# INTRADAY PULSE — STREAMLINED FULL VERSION (SCANNER + BACKTEST)
 # ============================================================
 
 st.set_page_config(
@@ -17,16 +17,20 @@ st.set_page_config(
 )
 
 # ============================================================
-# OPTIMAL PRE-SET PARAMETERS (No adjustment needed)
+# OPTIMAL PRE-SET PARAMETERS (No setup tools required)
 # ============================================================
 
-MIN_SCORE = 70
+MIN_SCORE = 55
 STRONG_SCORE = 80
 RVOL_THRESHOLD = 1.30
 BREAKOUT_BUFFER = 0.0015  # 0.15%
 MAX_EXTENSION = 3.0       # 3% max 5-bar extension
 DATA_DAYS = 60
+HOLDING_BARS = 8
 TARGET_R = 2.0
+BACKTEST_SCORE = 80
+ENTRY_BUFFER = 0.0
+MIN_BARS_BETWEEN_TRADES = 4
 
 MASTER_WATCHLIST = [
     "HFCL.NS", "RBLBANK.NS", "CUB.NS", "SAILIFE.NS", "AEGISLOG.NS",
@@ -515,81 +519,281 @@ def run_live_scan(stock_data, nifty):
     return out, market_info
 
 # ============================================================
+# BACKTEST ENGINE
+# ============================================================
+
+def backtest_stock(ticker, raw_df, nifty_raw):
+    df = calculate_indicators(raw_df)
+    nifty = prepare_nifty(nifty_raw)
+
+    if df.empty or nifty.empty or len(df) < 50:
+        return []
+
+    trades = []
+    last_trade_i = -9999
+
+    for i in range(35, len(df) - 1 - HOLDING_BARS):
+        if i - last_trade_i <= MIN_BARS_BETWEEN_TRADES:
+            continue
+
+        signal = score_at(df, nifty, i)
+        if signal is None:
+            continue
+
+        if signal["score"] < BACKTEST_SCORE:
+            continue
+
+        if not signal["breakout"]:
+            continue
+
+        if signal["extension"] > MAX_EXTENSION:
+            continue
+
+        entry_index = i + 1
+        entry_time = df.index[entry_index]
+        entry = float(df["Open"].iloc[entry_index])
+
+        if ENTRY_BUFFER > 0:
+            entry = max(entry, signal["price"] * (1 + ENTRY_BUFFER))
+
+        stop, target, risk = trade_levels(df, i, entry, signal["atr"])
+
+        exit_price = None
+        exit_time = None
+        exit_reason = None
+        bars_held = 0
+
+        end = min(entry_index + HOLDING_BARS, len(df) - 1)
+
+        for j in range(entry_index, end + 1):
+            high = float(df["High"].iloc[j])
+            low = float(df["Low"].iloc[j])
+
+            if low <= stop and high >= target:
+                exit_price = stop
+                exit_reason = "STOP_AND_TARGET_SAME_BAR"
+                exit_time = df.index[j]
+                bars_held = j - entry_index + 1
+                break
+
+            if low <= stop:
+                exit_price = stop
+                exit_reason = "STOP"
+                exit_time = df.index[j]
+                bars_held = j - entry_index + 1
+                break
+
+            if high >= target:
+                exit_price = target
+                exit_reason = "TARGET"
+                exit_time = df.index[j]
+                bars_held = j - entry_index + 1
+                break
+
+        if exit_price is None:
+            j = end
+            exit_price = float(df["Close"].iloc[j])
+            exit_time = df.index[j]
+            bars_held = j - entry_index + 1
+            exit_reason = "TIME_EXIT"
+
+        pnl = exit_price - entry
+        r_multiple = pnl / risk if risk > 0 else 0
+
+        if r_multiple > 0:
+            outcome = "WIN"
+        elif r_multiple < 0:
+            outcome = "LOSS"
+        else:
+            outcome = "BREAKEVEN"
+
+        trades.append({
+            "Stock": ticker.replace(".NS", ""),
+            "Signal Time": df.index[i],
+            "Entry Time": entry_time,
+            "Exit Time": exit_time,
+            "Score": signal["score"],
+            "Entry": round(entry, 2),
+            "Stop": round(stop, 2),
+            "Target": round(target, 2),
+            "Exit": round(exit_price, 2),
+            "R": round(r_multiple, 3),
+            "P&L/Share": round(pnl, 2),
+            "Outcome": outcome,
+            "Exit Reason": exit_reason,
+            "Bars Held": bars_held,
+            "RSI": round(signal["rsi"], 1),
+            "RVOL": round(signal["rvol"], 2),
+            "RS vs NIFTY": round(signal["rs"], 2),
+            "5-Bar Move %": round(signal["extension"], 2),
+            "Market": signal["market_regime"]
+        })
+
+        last_trade_i = i
+
+    return trades
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def run_full_backtest(tickers, days):
+    stock_data, download_errors = download_market_data(tickers, days)
+    nifty = download_nifty(days)
+
+    all_trades = []
+    errors = list(download_errors)
+
+    for ticker, raw in stock_data.items():
+        try:
+            trades = backtest_stock(ticker, raw, nifty)
+            all_trades.extend(trades)
+        except Exception:
+            errors.append(ticker)
+
+    trades_df = pd.DataFrame(all_trades)
+    if not trades_df.empty:
+        trades_df = trades_df.sort_values("Signal Time").reset_index(drop=True)
+
+    return trades_df, sorted(set(errors))
+
+
+def calculate_backtest_stats(trades):
+    if trades.empty:
+        return {}
+
+    total = len(trades)
+    wins = int((trades["Outcome"] == "WIN").sum())
+    losses = int((trades["Outcome"] == "LOSS").sum())
+    breakeven = int((trades["Outcome"] == "BREAKEVEN").sum())
+
+    win_rate = wins / total * 100
+    gross_profit = trades.loc[trades["R"] > 0, "R"].sum()
+    gross_loss = abs(trades.loc[trades["R"] < 0, "R"].sum())
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else np.inf
+    expectancy = trades["R"].mean()
+    avg_win = trades.loc[trades["R"] > 0, "R"].mean() if wins else 0
+    avg_loss = trades.loc[trades["R"] < 0, "R"].mean() if losses else 0
+
+    cumulative_r = trades["R"].cumsum()
+    peak = cumulative_r.cummax()
+    drawdown = cumulative_r - peak
+    max_drawdown = abs(drawdown.min())
+
+    return {
+        "Trades": total,
+        "Wins": wins,
+        "Losses": losses,
+        "Breakeven": breakeven,
+        "Win Rate %": win_rate,
+        "Avg Win R": avg_win,
+        "Avg Loss R": avg_loss,
+        "Profit Factor": profit_factor,
+        "Expectancy R/Trade": expectancy,
+        "Total R": trades["R"].sum(),
+        "Max Drawdown R": max_drawdown
+    }
+
+# ============================================================
 # UI INTERFACE
 # ============================================================
 
-st.markdown('<div class="main-title">⚡ Intraday Pulse V4</div>', unsafe_allow_html=True)
-st.markdown('<div class="subtitle">Clean, High-Speed Breakout & Momentum Command Center</div>', unsafe_allow_html=True)
+st.markdown("# ⚡ Intraday Pulse")
+st.markdown("High-Speed Breakout & Momentum Command Center")
 
-# Instant scan button right at top for fast access
-if st.button("🚀 Run Instant Market Scan", use_container_width=True, type="primary"):
-    with st.spinner(f"Scanning {len(MASTER_WATCHLIST)} stocks with institutional filters..."):
-        stock_data, errors = download_market_data(tuple(MASTER_WATCHLIST), DATA_DAYS)
-        nifty = download_nifty(DATA_DAYS)
-        results, market_info = run_live_scan(stock_data, nifty)
+scan_tab, backtest_tab = st.tabs(["🚀 Live Scanner", "📈 Backtest"])
 
-    st.session_state["live_results"] = results
-    st.session_state["market_info"] = market_info
-    st.session_state["scan_time"] = datetime.now()
+# ============================================================
+# LIVE SCANNER TAB
+# ============================================================
 
-if "live_results" not in st.session_state:
-    st.info(f"Tap **Run Instant Market Scan** above to instantly analyze your {len(MASTER_WATCHLIST)}-stock universe.")
-else:
-    results = st.session_state["live_results"]
-    market_info = st.session_state["market_info"]
+with scan_tab:
+    if st.button("🚀 Run Instant Market Scan", use_container_width=True, type="primary"):
+        with st.spinner(f"Scanning {len(MASTER_WATCHLIST)} stocks with institutional filters..."):
+            stock_data, errors = download_market_data(tuple(MASTER_WATCHLIST), DATA_DAYS)
+            nifty = download_nifty(DATA_DAYS)
+            results, market_info = run_live_scan(stock_data, nifty)
 
-    st.markdown(f"### Market Regime: {market_info['regime']}")
+        st.session_state["live_results"] = results
+        st.session_state["market_info"] = market_info
+        st.session_state["scan_time"] = datetime.now()
 
-    display = results[results["Score"] >= MIN_SCORE].copy()
+    if "live_results" not in st.session_state:
+        st.info(f"Tap **Run Instant Market Scan** above to instantly analyze your {len(MASTER_WATCHLIST)}-stock universe.")
+    else:
+        results = st.session_state["live_results"]
+        market_info = st.session_state["market_info"]
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Scanned", len(MASTER_WATCHLIST))
-    c2.metric("Qualified", len(display))
-    c3.metric("Strong", int((results["Score"] >= STRONG_SCORE).sum()))
-    c4.metric("Breakouts", int((results["Breakout"] == "YES").sum()))
+        st.markdown(f"### Market Regime: {market_info['regime']}")
 
-    st.markdown("---")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Scanned", len(MASTER_WATCHLIST))
+        c2.metric("Analyzed", len(results))
+        c3.metric("Strong", int((results["Score"] >= STRONG_SCORE).sum()))
+        c4.metric("Breakouts", int((results["Breakout"] == "YES").sum()))
 
-    if display.empty:
-        st.warning("No setups currently match your filters.")
-
-    for _, row in display.iterrows():
-        score = int(row["Score"])
+        st.markdown("---")
+        st.subheader("📋 Master Stock Information Table (All Scanned Stocks)")
         
-        # Native Streamlit card container to avoid raw text/HTML leak bugs
-        with st.container(border=True):
-            col_a, col_b = st.columns([3, 1])
-            with col_a:
-                st.markdown(f"### **{row['Stock']}** &nbsp;&nbsp; `{row['Verdict']}`")
-            with col_b:
-                st.metric("Score", f"{score}/100")
+        # Display ALL scanned stocks so user can inspect every single stock's data
+        st.dataframe(results, use_container_width=True, hide_index=True)
 
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Price", f"₹{row['Price']:,.2f}", f"{row['Change %']:+.2f}%")
-            with col2:
-                st.metric("Entry / SL", f"₹{row['Entry']}", f"SL: ₹{row['Stop Loss']}")
-            with col3:
-                st.metric("Target (2.0R)", f"₹{row['Target']}", f"RVOL: {row['RVOL']}x")
+        st.download_button(
+            "⬇️ Download All Results CSV",
+            results.to_csv(index=False).encode("utf-8"),
+            "intraday_all_stocks_scan.csv",
+            "text/csv",
+            use_container_width=True
+        )
 
-            with st.expander(f"📊 View Analysis & Filters"):
-                d1, d2, d3, d4 = st.columns(4)
-                d1.metric("RSI", row["RSI"])
-                d2.metric("RVOL", f"{row['RVOL']}x")
-                d3.metric("RS vs NIFTY", f"{row['Relative Strength']:+.2f}%")
-                d4.metric("VWAP Dist", f"{row['VWAP Distance %']:+.2f}%")
+# ============================================================
+# BACKTEST TAB
+# ============================================================
 
-                st.write(f"**Why Score:** {row['Why Score?']}")
-                st.write(f"**Risks:** {row['Risks']}")
+with backtest_tab:
+    st.subheader("📈 Historical Strategy Backtest Engine")
+    st.warning("Backtest simulates strategy performance across historical 15-minute data.")
 
-    st.markdown("---")
-    st.subheader("📋 Complete Scanner Data Table")
-    st.dataframe(display, use_container_width=True, hide_index=True)
+    if st.button("📊 Run Historical Backtest", use_container_width=True, type="primary"):
+        with st.spinner("Running historical event-by-event backtest across all stocks..."):
+            trades, errors = run_full_backtest(tuple(MASTER_WATCHLIST), DATA_DAYS)
 
-    st.download_button(
-        "⬇️ Download Results CSV",
-        display.to_csv(index=False).encode("utf-8"),
-        "intraday_scan_results.csv",
-        "text/css",
-        use_container_width=True
-    )
+        st.session_state["backtest_trades"] = trades
+        st.session_state["backtest_errors"] = errors
+        st.session_state["backtest_time"] = datetime.now()
+
+    if "backtest_trades" not in st.session_state:
+        st.info("Tap **Run Historical Backtest** above to measure win rates, expectancy, and profit factor.")
+    else:
+        trades = st.session_state["backtest_trades"]
+
+        if trades.empty:
+            st.error("No historical trades matched the current rules.")
+        else:
+            stats = calculate_backtest_stats(trades)
+
+            st.subheader("🎯 Backtest Performance Metrics")
+            bc1, bc2, bc3, bc4 = st.columns(4)
+            bc1.metric("Win Rate", f"{stats['Win Rate %']:.1f}%")
+            bc2.metric("Total Trades", stats["Trades"])
+            bc3.metric("Expectancy", f"{stats['Expectancy R/Trade']:+.3f}R")
+            bc4.metric("Profit Factor", f"{stats['Profit Factor']:.2f}" if np.isfinite(stats["Profit Factor"]) else "∞")
+
+            bc1, bc2, bc3, bc4 = st.columns(4)
+            bc1.metric("Total R", f"{stats['Total R']:+.2f}R")
+            bc2.metric("Avg Win", f"{stats['Avg Win R']:+.2f}R")
+            bc3.metric("Avg Loss", f"{stats['Avg Loss R']:+.2f}R")
+            bc4.metric("Max Drawdown", f"{stats['Max Drawdown R']:.2f}R")
+
+            st.subheader("📈 Cumulative Equity Curve (R)")
+            equity = trades["R"].cumsum()
+            st.line_chart(pd.DataFrame({"Cumulative R": equity.values}))
+
+            st.subheader("📒 Complete Backtest Trade Log")
+            st.dataframe(trades, use_container_width=True, hide_index=True)
+
+            st.download_button(
+                "⬇️ Download Trade Log CSV",
+                trades.to_csv(index=False).encode("utf-8"),
+                "backtest_trade_log.csv",
+                "text/csv",
+                use_container_width=True
+            )
