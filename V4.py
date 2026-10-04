@@ -1,26 +1,38 @@
-
-import streamlit as st
-import pandas as pd
-import yfinance as yf
-import numpy as np
-from datetime import datetime
 import time
+from datetime import datetime
+
+import numpy as np
+import pandas as pd
+import streamlit as st
+import yfinance as yf
 
 # ============================================================
-# INTRADAY PULSE V4
-# V3 SCANNER + HISTORICAL BACKTEST ENGINE
+# INTRADAY PULSE — DAILY SWING EDITION (Higher Highs / Lower Lows)
 # ============================================================
 
-st.set_page_config(
-    page_title="Intraday Pulse V4",
-    page_icon="⚡",
-    layout="wide",
-    initial_sidebar_state="collapsed"
-)
+st.set_page_config(page_title="Daily Swing Pulse", page_icon="📈", layout="wide",
+                   initial_sidebar_state="collapsed")
 
-# ============================================================
-# MASTER WATCHLIST
-# ============================================================
+IST = "Asia/Kolkata"
+
+
+def _ver(v):
+    return tuple(int(x) for x in v.split(".")[:2] if x.isdigit())
+
+
+STRETCH = {"width": "stretch"} if _ver(st.__version__) >= (1, 50) else {"use_container_width": True}
+
+# ---------------- Daily Swing Parameters ----------------
+DATA_PERIOD = "2y"             # 2 years of daily data for robust swing backtesting
+EMA_TREND = 20                 # Daily 20 EMA baseline
+HOLDING_DAYS = 15              # Max swing holding days
+TARGET_R = 2.0                 # 2:1 Reward-to-Risk target for daily swings
+BACKTEST_SCORE = 75
+SLIPPAGE_PCT = 0.05            # Daily slippage is minimal
+COST_ROUND_TRIP_PCT = 0.15     # Delivery / Swing brokerage + STT estimate
+OOS_FRACTION = 0.30
+MAX_CONCURRENT_POSITIONS = 5
+RISK_PER_TRADE_PCT = 1.0       # 1% capital risked per swing trade
 
 MASTER_WATCHLIST = [
     "HFCL.NS", "RBLBANK.NS", "CUB.NS", "SAILIFE.NS", "AEGISLOG.NS",
@@ -54,595 +66,367 @@ MASTER_WATCHLIST = [
     "JIOFIN.NS", "DRREDDY.NS", "ULTRACEMCO.NS", "POWERGRID.NS",
     "HINDUNILVR.NS", "NTPC.NS", "ITC.NS", "ADANIENT.NS", "M&M.NS",
     "EICHERMOT.NS", "GRASIM.NS", "ADANIPORTS.NS", "TATASTEEL.NS",
-    "SHRIRAMFIN.NS", "MARUTI.NS", "BAJAJ-AUTO.NS"
+    "SHRIRAMFIN.NS", "MARUTI.NS", "BAJAJ-AUTO.NS",
 ]
 
 # ============================================================
-# SETTINGS
+# DATA DOWNLOAD (Daily Interval)
 # ============================================================
 
-st.sidebar.header("⚙️ Scanner / Backtest Settings")
-
-MIN_SCORE = st.sidebar.slider("Minimum display/backtest score", 40, 90, 55, 5)
-STRONG_SCORE = st.sidebar.slider("Strong setup score", 70, 95, 80, 5)
-RVOL_THRESHOLD = st.sidebar.slider("Minimum RVOL", 1.0, 3.0, 1.30, 0.10)
-BREAKOUT_BUFFER = st.sidebar.slider("Breakout buffer %", 0.0, 1.0, 0.15, 0.05) / 100
-MAX_EXTENSION = st.sidebar.slider("Maximum 5-bar extension %", 1.0, 6.0, 3.0, 0.5)
-
-DATA_DAYS = st.sidebar.selectbox(
-    "Yahoo intraday history",
-    [30, 45, 60],
-    index=2
-)
-
-HOLDING_BARS = st.sidebar.slider(
-    "Backtest max holding bars",
-    2, 20, 8, 1
-)
-
-TARGET_R = st.sidebar.slider(
-    "Backtest target (R)",
-    1.0, 4.0, 2.0, 0.5
-)
-
-BACKTEST_SCORE = st.sidebar.slider(
-    "Backtest minimum score",
-    50, 95, 80, 5
-)
-
-ENTRY_BUFFER = st.sidebar.slider(
-    "Entry buffer %",
-    0.0, 0.5, 0.0, 0.05
-) / 100
-
-MIN_BARS_BETWEEN_TRADES = st.sidebar.slider(
-    "Minimum bars between same-stock trades",
-    0, 20, 4, 1
-)
-
-SHOW_WATCH = st.sidebar.checkbox("Show conditional setups", True)
-
-# ============================================================
-# STYLE
-# ============================================================
-
-st.markdown("""
-<style>
-.main-title {font-size:42px;font-weight:800;margin-bottom:0;}
-.subtitle {font-size:16px;color:#777;margin-bottom:25px;}
-.stock-card {
-    background:#11161c;border-radius:18px;padding:20px;margin-bottom:18px;
-    border:1px solid #29313a;box-shadow:0 5px 18px rgba(0,0,0,.20);
-}
-.stock-header {display:flex;justify-content:space-between;align-items:center;}
-.stock-name {font-size:25px;font-weight:800;}
-.score {padding:8px 15px;border-radius:20px;font-weight:800;font-size:18px;}
-.green {background:#16883b;color:white;}
-.yellow {background:#c99b00;color:white;}
-.red {background:#a82b2b;color:white;}
-.price {font-size:24px;font-weight:700;}
-.positive {color:#35c759;font-weight:700;}
-.negative {color:#ff4d4d;font-weight:700;}
-.info-row {
-    display:flex;justify-content:space-between;margin-top:10px;
-    padding-top:10px;border-top:1px solid #29313a;
-}
-.label {color:#999;font-size:13px;}
-.value {font-weight:700;}
-</style>
-""", unsafe_allow_html=True)
-
-# ============================================================
-# DATA DOWNLOAD
-# ============================================================
-
-@st.cache_data(ttl=60, show_spinner=False)
-def download_market_data(tickers, days):
-    all_data = {}
-    errors = []
+@st.cache_data(ttl=300, show_spinner=False)
+def download_daily_data(tickers, period):
+    all_data, errors = {}, []
     chunk_size = 35
-
     for start in range(0, len(tickers), chunk_size):
         chunk = list(tickers[start:start + chunk_size])
         try:
-            data = yf.download(
-                chunk,
-                period=f"{days}d",
-                interval="15m",
-                auto_adjust=False,
-                progress=False,
-                group_by="ticker",
-                threads=True
-            )
-
+            data = yf.download(chunk, period=period, interval="1d", auto_adjust=True,
+                               progress=False, group_by="ticker", threads=True)
             if data.empty:
                 errors.extend(chunk)
                 continue
-
-            for ticker in chunk:
+            for t in chunk:
                 try:
                     if isinstance(data.columns, pd.MultiIndex):
-                        if ticker in data.columns.get_level_values(0):
-                            df = data[ticker].copy()
-                        elif ticker in data.columns.get_level_values(1):
-                            df = data.xs(ticker, axis=1, level=1).copy()
+                        if t in data.columns.get_level_values(0):
+                            df = data[t].copy()
+                        elif t in data.columns.get_level_values(1):
+                            df = data.xs(t, axis=1, level=1).copy()
                         else:
-                            errors.append(ticker)
+                            errors.append(t)
                             continue
                     else:
                         df = data.copy()
-
+                    
                     df = df.dropna(subset=["Close"])
-                    if len(df) >= 40:
-                        all_data[ticker] = df
+                    if len(df) >= 100:
+                        all_data[t] = df
                     else:
-                        errors.append(ticker)
+                        errors.append(t)
                 except Exception:
-                    errors.append(ticker)
+                    errors.append(t)
         except Exception:
             errors.extend(chunk)
-
         time.sleep(0.15)
-
     return all_data, sorted(set(errors))
 
-
-@st.cache_data(ttl=60, show_spinner=False)
-def download_nifty(days):
-    try:
-        df = yf.download(
-            "^NSEI",
-            period=f"{days}d",
-            interval="15m",
-            auto_adjust=False,
-            progress=False
-        )
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        return df.dropna(subset=["Close"])
-    except Exception:
-        return pd.DataFrame()
-
 # ============================================================
-# INDICATORS
+# DAILY INDICATORS & MARKET STRUCTURE (HH / HL / LL / LH)
 # ============================================================
 
-def calculate_indicators(df):
-    df = df.copy()
-
-    for col in ["Open", "High", "Low", "Close", "Volume"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    df = df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
-
-    if len(df) < 40:
+def calculate_daily_indicators(raw):
+    df = raw[["Open", "High", "Low", "Close", "Volume"]].apply(pd.to_numeric, errors="coerce").dropna()
+    if len(df) < 50:
         return pd.DataFrame()
 
-    # EMA
-    df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
+    df["EMA20"] = df["Close"].ewm(span=EMA_TREND, adjust=False).mean()
 
-    # RSI
     delta = df["Close"].diff()
-    gain = delta.clip(lower=0).rolling(14).mean()
-    loss = (-delta.clip(upper=0)).rolling(14).mean()
-    rs = gain / loss.replace(0, np.nan)
-    df["RSI"] = 100 - (100 / (1 + rs))
+    gain = delta.clip(lower=0).ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
+    loss = (-delta.clip(upper=0)).ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
+    df["RSI"] = 100 - 100 / (1 + gain / loss)
 
-    # ATR
-    prev = df["Close"].shift(1)
-    tr = pd.concat([
-        df["High"] - df["Low"],
-        abs(df["High"] - prev),
-        abs(df["Low"] - prev)
-    ], axis=1).max(axis=1)
-    df["ATR"] = tr.rolling(14).mean()
+    prev_close = df["Close"].shift(1)
+    tr = pd.concat([df["High"] - df["Low"],
+                    (df["High"] - prev_close).abs(),
+                    (df["Low"] - prev_close).abs()], axis=1).max(axis=1)
+    df["ATR"] = tr.ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
 
-    # Session VWAP
-    df["Date"] = df.index.date
-    df["TypicalPrice"] = (df["High"] + df["Low"] + df["Close"]) / 3
-    df["TPVolume"] = df["TypicalPrice"] * df["Volume"]
-    df["CumTPVolume"] = df["TPVolume"].groupby(df["Date"]).cumsum()
-    df["CumVolume"] = df["Volume"].groupby(df["Date"]).cumsum()
-    df["VWAP"] = df["CumTPVolume"] / df["CumVolume"].replace(0, np.nan)
+    # --- MARKET STRUCTURE: Higher Highs / Higher Lows & Lower Lows / Lower Highs ---
+    # Rolling 5-day local peaks and troughs
+    df["SwingHigh"] = df["High"].rolling(5, center=True).max()
+    df["SwingLow"] = df["Low"].rolling(5, center=True).min()
+    
+    # Forward fill swing levels for trend classification
+    df["PrevSwingHigh"] = df["SwingHigh"].shift(5)
+    df["PrevSwingLow"] = df["SwingLow"].shift(5)
 
-    # 20-bar resistance
-    df["Previous20High"] = df["High"].rolling(20).max().shift(1)
-    df["Breakout"] = (
-        df["Close"] >
-        df["Previous20High"] * (1 + BREAKOUT_BUFFER)
-    )
-    df["FreshBreakout"] = (
-        df["Breakout"] &
-        ~df["Breakout"].shift(1).fillna(False)
-    )
+    # Structure conditions
+    df["HigherHigh"] = df["High"] > df["PrevSwingHigh"]
+    df["HigherLow"] = df["Low"] > df["PrevSwingLow"]
+    df["LowerLow"] = df["Low"] < df["PrevSwingLow"]
+    df["LowerHigh"] = df["High"] < df["PrevSwingHigh"]
 
-    # Breakout age without future leakage
-    age = 999
-    ages = []
-    for fresh in df["FreshBreakout"].fillna(False):
-        if fresh:
-            age = 0
-        elif age < 999:
-            age += 1
-        ages.append(age)
-    df["BreakoutAge"] = ages
+    # --- LONG SWING SETUP (Uptrend + Pullback to EMA20 + Resumption) ---
+    df["LongTrend"] = (df["Close"] > df["EMA20"]) & df["HigherHigh"] & df["HigherLow"]
+    near_ema_l = (df["Low"] <= df["EMA20"] * 1.01) & (df["Low"] >= df["EMA20"] * 0.98)
+    df["LongPullback"] = near_ema_l | (df["Low"] <= df["Low"].rolling(3).min() * 1.005)
+    df["LongResumption"] = (df["Close"] > df["Open"]) & (df["Close"] > df["High"].shift(1))
+    df["LongSignal"] = df["LongTrend"] & df["LongPullback"] & df["LongResumption"]
 
-    # Candle structure
-    candle_range = (df["High"] - df["Low"]).replace(0, np.nan)
-    body = abs(df["Close"] - df["Open"])
-    df["BodyPct"] = body / candle_range
-    df["CloseLocation"] = (df["Close"] - df["Low"]) / candle_range
-    df["UpperWickPct"] = (
-        df["High"] - df[["Open", "Close"]].max(axis=1)
-    ) / candle_range
-
-    df["StrongCandle"] = (
-        (df["Close"] > df["Open"]) &
-        (df["BodyPct"] >= 0.50) &
-        (df["CloseLocation"] >= 0.70) &
-        (df["UpperWickPct"] <= 0.30)
-    )
-
-    # Time-of-day RVOL, calculated only from prior dates
-    df["BarTime"] = df.index.strftime("%H:%M")
-    historical = df.copy()
-    current_date = df["Date"].iloc[-1]
-    historical = historical[historical["Date"] < current_date]
-
-    if len(historical):
-        ref = historical.groupby("BarTime")["Volume"].mean()
-        df["TimeOfDayAvgVolume"] = df["BarTime"].map(ref)
-        df["RVOL"] = df["Volume"] / df["TimeOfDayAvgVolume"]
-    else:
-        df["RVOL"] = df["Volume"] / df["Volume"].rolling(20).mean()
-
-    # Momentum
-    df["RSIRising"] = df["RSI"] > df["RSI"].shift(1)
-    df["Return5"] = (df["Close"] / df["Close"].shift(5) - 1) * 100
+    # --- SHORT SWING SETUP (Downtrend + Rally to EMA20 resistance + Resumption) ---
+    df["ShortTrend"] = (df["Close"] < df["EMA20"]) & df["LowerLow"] & df["LowerHigh"]
+    near_ema_s = (df["High"] >= df["EMA20"] * 0.99) & (df["High"] <= df["EMA20"] * 1.02)
+    df["ShortPullback"] = near_ema_s | (df["High"] >= df["High"].rolling(3).max() * 0.995)
+    df["ShortResumption"] = (df["Close"] < df["Open"]) & (df["Close"] < df["Low"].shift(1))
+    df["ShortSignal"] = df["ShortTrend"] & df["ShortPullback"] & df["ShortResumption"]
 
     return df
 
-# ============================================================
-# MARKET / RELATIVE STRENGTH
-# ============================================================
 
-def prepare_nifty(df):
-    return calculate_indicators(df) if not df.empty else pd.DataFrame()
+def build_daily_frame(raw, mode):
+    df = calculate_daily_indicators(raw)
+    if df.empty:
+        return pd.DataFrame()
 
-
-def relative_strength_at(stock_df, nifty_df, i):
-    try:
-        if i < 5:
-            return 0.0
-        stock_now = stock_df["Close"].iloc[i]
-        stock_prev = stock_df["Close"].iloc[i - 5]
-        stock_ret = (stock_now / stock_prev - 1) * 100
-
-        ts = stock_df.index[i]
-        nifty_slice = nifty_df.loc[:ts]
-        if len(nifty_slice) < 6:
-            return 0.0
-
-        nifty_now = nifty_slice["Close"].iloc[-1]
-        nifty_prev = nifty_slice["Close"].iloc[-6]
-        nifty_ret = (nifty_now / nifty_prev - 1) * 100
-
-        return float(stock_ret - nifty_ret)
-    except Exception:
-        return 0.0
-
-
-def market_regime_at(nifty, i):
-    try:
-        row = nifty.iloc[i]
-        score = 0
-        if row["Close"] > row["EMA20"]:
-            score += 5
-        if row["Close"] > row["VWAP"]:
-            score += 5
-
-        if score >= 10:
-            regime = "🟢 BULLISH"
-        elif score >= 5:
-            regime = "🟡 NEUTRAL"
-        else:
-            regime = "🔴 BEARISH"
-
-        return score, regime
-    except Exception:
-        return 5, "🟡 UNKNOWN"
-
-# ============================================================
-# SCORE AT A HISTORICAL BAR
-# IMPORTANT: ONLY DATA UP TO BAR i IS USED.
-# ============================================================
-
-def score_at(df, nifty, i):
-    if i < 30:
-        return None
-
-    row = df.iloc[i]
-
-    vals = ["Close", "EMA20", "VWAP", "RSI", "ATR", "RVOL",
-            "Previous20High", "Return5"]
-    if any(pd.isna(row[v]) for v in vals):
-        return None
-
-    price = float(row["Close"])
-    ema = float(row["EMA20"])
-    vwap = float(row["VWAP"])
-    rsi = float(row["RSI"])
-    atr = float(row["ATR"])
-    rvol = float(row["RVOL"])
-    prev_high = float(row["Previous20High"])
-    extension = float(row["Return5"])
-
-    breakout = bool(row["Breakout"])
-    fresh = bool(row["FreshBreakout"])
-    strong_candle = bool(row["StrongCandle"])
-    rsi_rising = bool(row["RSIRising"])
-    breakout_age = int(row["BreakoutAge"])
-
-    market_score, market_regime = market_regime_at(
-        nifty,
-        min(i, len(nifty) - 1)
-    )
-    rs = relative_strength_at(df, nifty, i)
-
-    score = 0
-    reasons = []
-    risks = []
-
-    # Trend 20
-    if price > ema:
-        score += 10
-        reasons.append("Above EMA20")
+    if mode == "🟢 BULLISH (Long Swings Only)":
+        df["Signal"] = df["LongSignal"]
+        df["Direction"] = "LONG"
+    elif mode == "🔴 BEARISH (Short Swings Only)":
+        df["Signal"] = df["ShortSignal"]
+        df["Direction"] = "SHORT"
     else:
-        risks.append("Below EMA20")
+        df["Signal"] = False
+        df["Direction"] = "NONE"
 
-    if price > vwap:
-        score += 10
-        reasons.append("Above VWAP")
+    df["Score"] = 80
+    need = ["EMA20", "RSI", "ATR"]
+    df["Valid"] = df[need].notna().all(axis=1) & df["Signal"]
+    return df
+
+
+def swing_trade_levels(direction, df, i, entry, atr):
+    if direction == "LONG":
+        swing_low = float(df["Low"].iloc[max(0, i - 5):i + 1].min())
+        stop = min(swing_low - 0.2 * atr, entry - 1.5 * atr)
+        risk = entry - stop
+        target = entry + TARGET_R * risk
     else:
-        risks.append("Below VWAP")
-
-    # Breakout 25
-    if breakout:
-        score += 15
-        reasons.append("20-bar breakout")
-
-        distance = (price / prev_high - 1) * 100
-        if distance >= 0.30:
-            score += 5
-            reasons.append("Strong breakout distance")
-        elif distance >= 0.15:
-            score += 3
-            reasons.append("Confirmed breakout distance")
-
-        if fresh:
-            score += 5
-            reasons.append("Fresh breakout")
-        elif breakout_age <= 3:
-            score += 3
-            reasons.append("Recent breakout")
-        elif breakout_age > 6:
-            risks.append("Aging breakout")
-    else:
-        risks.append("No confirmed breakout")
-
-    # Volume 15
-    if rvol >= 2.0:
-        score += 15
-        reasons.append(f"Exceptional RVOL {rvol:.1f}x")
-    elif rvol >= RVOL_THRESHOLD:
-        score += 10
-        reasons.append(f"Strong RVOL {rvol:.1f}x")
-    elif rvol >= 1.0:
-        score += 5
-        reasons.append(f"Normal RVOL {rvol:.1f}x")
-    else:
-        risks.append(f"Low RVOL {rvol:.1f}x")
-
-    # Momentum 15
-    if 55 <= rsi <= 70:
-        score += 8
-        reasons.append(f"Healthy RSI {rsi:.1f}")
-    elif 70 < rsi <= 80:
-        score += 6
-        reasons.append(f"Strong RSI {rsi:.1f}")
-    elif 50 <= rsi < 55:
-        score += 4
-        reasons.append(f"Developing RSI {rsi:.1f}")
-    elif rsi > 80:
-        score += 2
-        risks.append(f"Overheated RSI {rsi:.1f}")
-    else:
-        risks.append(f"Weak RSI {rsi:.1f}")
-
-    if rsi_rising:
-        score += 4
-        reasons.append("RSI rising")
-    else:
-        risks.append("RSI not rising")
-
-    if strong_candle:
-        score += 3
-        reasons.append("Strong candle")
-    else:
-        risks.append("Weak candle")
-
-    # Relative strength 10
-    if rs >= 1.5:
-        score += 10
-        reasons.append("Strong RS vs NIFTY")
-    elif rs >= 0.75:
-        score += 7
-        reasons.append("Positive RS vs NIFTY")
-    elif rs >= 0.25:
-        score += 4
-        reasons.append("Moderate RS")
-    else:
-        risks.append("Weak RS vs NIFTY")
-
-    # Market 10
-    if market_score >= 10:
-        score += 10
-        reasons.append("Bullish NIFTY")
-    elif market_score >= 5:
-        score += 5
-        reasons.append("Neutral NIFTY")
-    else:
-        risks.append("Bearish NIFTY")
-
-    # Extension/risk 5
-    if extension <= 1.5:
-        score += 5
-        reasons.append("Not extended")
-    elif extension <= MAX_EXTENSION:
-        score += 3
-        reasons.append("Moderately extended")
-    else:
-        risks.append(f"Extended {extension:.1f}% / 5 bars")
-
-    return {
-        "score": int(min(max(score, 0), 100)),
-        "price": price,
-        "atr": atr,
-        "rsi": rsi,
-        "rvol": rvol,
-        "vwap": vwap,
-        "rs": rs,
-        "extension": extension,
-        "breakout": breakout,
-        "fresh": fresh,
-        "breakout_age": breakout_age,
-        "market_score": market_score,
-        "market_regime": market_regime,
-        "reasons": reasons,
-        "risks": risks
-    }
-
-# ============================================================
-# STOP / TARGET
-# ============================================================
-
-def trade_levels(df, i, price, atr, target_r):
-    start = max(0, i - 5)
-    swing_low = float(df["Low"].iloc[start:i].min())
-
-    prev_high = df["Previous20High"].iloc[i]
-
-    if pd.notna(prev_high):
-        structure_stop = min(
-            swing_low,
-            float(prev_high) - 0.5 * atr
-        )
-    else:
-        structure_stop = swing_low
-
-    atr_stop = price - 1.5 * atr
-    stop = max(structure_stop, atr_stop)
-
-    # Keep stop below entry
-    stop = min(stop, price * 0.995)
-
-    risk = price - stop
-
-    if risk <= 0 or not np.isfinite(risk):
-        risk = price * 0.01
-        stop = price - risk
-
-    target = price + target_r * risk
-
+        swing_high = float(df["High"].iloc[max(0, i - 5):i + 1].max())
+        stop = max(swing_high + 0.2 * atr, entry + 1.5 * atr)
+        risk = stop - entry
+        target = entry - TARGET_R * risk
     return float(stop), float(target), float(risk)
 
 # ============================================================
-# LIVE SCANNER
+# LIVE SCANNER (Daily)
 # ============================================================
 
-def run_live_scan(stock_data, nifty):
-    nifty_ind = prepare_nifty(nifty)
-
-    if nifty_ind.empty:
-        market_info = {"score": 5, "regime": "🟡 UNKNOWN"}
-    else:
-        ms, mr = market_regime_at(nifty_ind, len(nifty_ind) - 1)
-        market_info = {"score": ms, "regime": mr}
-
-    results = []
-
+def run_daily_scan(stock_data, mode):
+    rows, skipped = [], []
     for ticker, raw in stock_data.items():
-        df = calculate_indicators(raw)
-        if df.empty or nifty_ind.empty:
+        df = build_daily_frame(raw, mode)
+        if df.empty:
+            skipped.append(ticker)
             continue
-
         i = len(df) - 1
-        s = score_at(df, nifty_ind, i)
-        if s is None:
+        last = df.iloc[i]
+        if not last["Valid"]:
+            skipped.append(ticker)
             continue
 
-        stop, target, risk = trade_levels(
-            df, i, s["price"], s["atr"], TARGET_R
-        )
+        direction = last["Direction"]
+        close = float(last["Close"])
+        stop, target, risk = swing_trade_levels(direction, df, i, close, float(last["ATR"]))
 
-        if s["extension"] > MAX_EXTENSION:
-            status = "🟠 EXTENDED"
-        elif s["score"] >= STRONG_SCORE and s["breakout"]:
-            status = "🟢 ENTER / CONFIRM"
-        elif s["score"] >= MIN_SCORE and s["breakout"]:
-            status = "🟡 WATCH BREAKOUT"
-        elif s["score"] >= MIN_SCORE:
-            status = "🟡 WAIT FOR BREAKOUT"
-        else:
-            status = "🔴 AVOID"
-
-        if s["score"] >= STRONG_SCORE and s["breakout"]:
-            verdict = "🟢 STRONG SETUP"
-        elif s["score"] >= MIN_SCORE:
-            verdict = "🟡 CONDITIONAL WATCH"
-        else:
-            verdict = "⚪ WEAK / NEUTRAL"
-
-        prev_close = float(df["Close"].iloc[-2])
-        change = (s["price"] / prev_close - 1) * 100
-
-        results.append({
-            "Stock": ticker.replace(".NS", ""),
-            "Score": s["score"],
-            "Verdict": verdict,
-            "Status": status,
-            "Price": round(s["price"], 2),
-            "Change %": round(change, 2),
-            "Entry": round(s["price"], 2),
-            "Stop Loss": round(stop, 2),
-            "Target": round(target, 2),
-            "Risk/Share": round(risk, 2),
-            "R:R": round(target_r, 2),
-            "RSI": round(s["rsi"], 1),
-            "RVOL": round(s["rvol"], 2),
-            "Relative Strength": round(s["rs"], 2),
-            "VWAP Distance %": round((s["price"] / s["vwap"] - 1) * 100, 2),
-            "Breakout": "YES" if s["breakout"] else "NO",
-            "Breakout Age": s["breakout_age"],
-            "5-Bar Move %": round(s["extension"], 2),
-            "Why Score?": ", ".join(s["reasons"]),
-            "Risks": ", ".join(s["risks"]) if s["risks"] else "None"
+        rows.append({
+            "Stock": ticker.replace(".NS", ""), "Direction": direction,
+            "Close Price": round(close, 2), "Stop Loss": round(stop, 2),
+            "Target": round(target, 2), "Risk/Share": round(risk, 2), "R:R": TARGET_R,
+            "RSI": round(float(last["RSI"]), 1),
+            "Structure": "Higher High / Higher Low" if direction == "LONG" else "Lower Low / Lower High"
         })
 
-    out = pd.DataFrame(results)
+    out = pd.DataFrame(rows)
     if not out.empty:
-        out = out.sort_values(
-            ["Score", "RVOL", "Relative Strength"],
-            ascending=[False, False, False]
-        )
-    return out, market_info
+        out = out.sort_values("Stock").reset_index(drop=True)
+    return out, sorted(skipped)
 
 # ============================================================
-# BACKTEST ENGINE
+# PORTFOLIO BACKTEST (Daily Swing Simulation)
 # ============================================================
 
-def backtest_stock(ticker, raw_df, nifty_raw):
-    """
-    Event-driven backtest.
+def run_daily_backtest(tickers, period, mode):
+    stock_data, dl_errors = download_daily_data(tickers, period)
+    errors, skipped, signals = list(dl_errors), [], []
 
-    Signal is evaluated at the CLOSE of b
+    for ticker, raw in stock_data.items():
+        try:
+            df = build_daily_frame(raw, mode)
+            if df.empty:
+                skipped.append(ticker)
+                continue
+
+            o, h, l, c = df["Open"].values, df["High"].values, df["Low"].values, df["Close"].values
+            atr = df["ATR"].values
+            sig = df["Valid"].values
+            direction = df["Direction"].iloc[0]
+            n = len(df)
+
+            for i in range(50, n - 1):
+                if not sig[i]:
+                    continue
+                entry_idx = i + 1
+                entry = o[entry_idx] * (1 + SLIPPAGE_PCT / 100 if direction == "LONG" else 1 - SLIPPAGE_PCT / 100)
+                stop, target, risk = swing_trade_levels(direction, df, i, entry, atr[i])
+
+                exit_price = reason = None
+                exit_idx = min(n - 1, entry_idx + HOLDING_DAYS)
+
+                for k in range(entry_idx, exit_idx + 1):
+                    bar_h, bar_l, bar_o = h[k], l[k], o[k]
+                    if direction == "LONG":
+                        if bar_l <= stop:
+                            exit_price = min(stop, bar_o)
+                            reason = "STOP"
+                            exit_idx = k
+                            break
+                        if bar_h >= target:
+                            exit_price = target
+                            reason = "TARGET"
+                            exit_idx = k
+                            break
+                    else:
+                        if bar_h >= stop:
+                            exit_price = max(stop, bar_o)
+                            reason = "STOP"
+                            exit_idx = k
+                            break
+                        if bar_l <= target:
+                            exit_price = target
+                            reason = "TARGET"
+                            exit_idx = k
+                            break
+
+                if exit_price is None:
+                    exit_idx = min(n - 1, entry_idx + HOLDING_DAYS)
+                    exit_price = c[exit_idx]
+                    reason = "TIME_EXIT"
+
+                if direction == "LONG":
+                    pnl = exit_price - entry - entry * COST_ROUND_TRIP_PCT / 100
+                else:
+                    pnl = entry - exit_price - entry * COST_ROUND_TRIP_PCT / 100
+
+                r = pnl / risk if risk > 0 else 0.0
+
+                signals.append({
+                    "ticker": ticker.replace(".NS", ""), "direction": direction,
+                    "signal_date": df.index[i].date(), "entry_date": df.index[entry_idx].date(),
+                    "exit_date": df.index[exit_idx].date(), "entry": round(entry, 2),
+                    "stop": round(stop, 2), "target": round(target, 2), "exit": round(exit_price, 2),
+                    "R (net)": round(r, 3), "Outcome": "WIN" if r > 0 else "LOSS" if r < 0 else "BREAKEVEN",
+                    "Exit Reason": reason, "Days Held": exit_idx - entry_idx + 1
+                })
+        except Exception:
+            errors.append(ticker)
+
+    trades_df = pd.DataFrame(signals)
+    if not trades_df.empty:
+        trades_df = trades_df.sort_values("entry_date").reset_index(drop=True)
+    return trades_df, sorted(set(errors)), sorted(set(skipped))
+
+# ============================================================
+# STATS & UI
+# ============================================================
+
+def wilson_ci(wins, n, z=1.96):
+    if n == 0: return 0.0, 0.0
+    p = wins / n
+    d = 1 + z * z / n
+    centre = (p + z * z / (2 * n)) / d
+    half = z * np.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+    return (centre - half) * 100, (centre + half) * 100
+
+
+def calculate_stats(trades):
+    if trades.empty: return {}
+    t = trades.sort_values("exit_date")
+    r, n = t["R (net)"], len(t)
+    wins, losses = int((r > 0).sum()), int((r < 0).sum())
+    gp, gl = r[r > 0].sum(), -r[r < 0].sum()
+    eq = np.concatenate([[0.0], r.cumsum().values])
+    max_dd = -(eq - np.maximum.accumulate(eq)).min()
+    lo, hi = wilson_ci(wins, n)
+    se = r.std(ddof=1) / np.sqrt(n) if n > 1 else np.nan
+
+    return {
+        "Trades": n, "Wins": wins, "Losses": losses,
+        "Win Rate %": wins / n * 100, "Win Rate 95% CI": f"{lo:.0f}-{hi:.0f}%",
+        "Avg Win R": r[r > 0].mean() if wins else 0.0,
+        "Avg Loss R": r[r < 0].mean() if losses else 0.0,
+        "Profit Factor": gp / gl if gl > 0 else np.inf,
+        "Expectancy R": r.mean(), "Per-trade t-stat": r.mean() / se if se and se > 0 else np.nan,
+        "Total R": r.sum(), "Max Drawdown R": max_dd,
+        "Return % (non-compounded)": r.sum() * RISK_PER_TRADE_PCT,
+    }
+
+
+st.markdown("# 📈 Daily Swing Pulse")
+st.caption("Daily Candle Swing Trading Edition with Market Structure (Higher Highs / Lower Lows).")
+
+market_mode = st.selectbox(
+    "🌐 Swing Market Direction (Manual Control)",
+    [
+        "🟢 BULLISH (Long Swings Only)",
+        "🔴 BEARISH (Short Swings Only)"
+    ]
+)
+
+scan_tab, backtest_tab = st.tabs(["🚀 EOD Daily Scan", "📈 Swing Backtest"])
+
+with scan_tab:
+    if st.button("🚀 Run Daily Swing Scan", type="primary", key="scan", **STRETCH):
+        try:
+            with st.spinner(f"Scanning {len(MASTER_WATCHLIST)} daily charts..."):
+                stock_data, dl_errors = download_daily_data(tuple(MASTER_WATCHLIST), DATA_PERIOD)
+                results, skipped = run_daily_scan(stock_data, market_mode)
+            st.session_state.update(daily_results=results, daily_skipped=skipped, scan_time=datetime.now())
+        except Exception as e:
+            st.error(f"Scan failed: {e}")
+
+    if "daily_results" not in st.session_state:
+        st.info("Select your market direction above and tap **Run Daily Swing Scan**.")
+    else:
+        results = st.session_state["daily_results"]
+        c1, c2 = st.columns(2)
+        c1.metric("Watchlist", len(MASTER_WATCHLIST))
+        c2.metric("Qualifying Setups", len(results))
+
+        if results.empty:
+            st.warning("No daily swing setups match the current structure filter.")
+        else:
+            st.dataframe(results, hide_index=True, **STRETCH)
+            st.download_button("⬇️ Download Daily Setups CSV", results.to_csv(index=False).encode("utf-8"),
+                               "daily_swing_setups.csv", "text/csv", **STRETCH)
+
+with backtest_tab:
+    st.subheader("📈 Multi-Day Swing Strategy Backtest")
+    st.warning(f"Simulating daily swing trades over {DATA_PERIOD}. Mode: {market_mode}. Target R: {TARGET_R}.")
+
+    if st.button("📊 Run Swing Backtest", type="primary", key="bt", **STRETCH):
+        try:
+            with st.spinner("Running daily swing simulation..."):
+                trades, errors, skipped = run_daily_backtest(tuple(MASTER_WATCHLIST), DATA_PERIOD, market_mode)
+            st.session_state.update(swing_trades=trades)
+        except Exception as e:
+            st.error(f"Backtest failed: {e}")
+
+    if "swing_trades" not in st.session_state:
+        st.info("Tap **Run Swing Backtest** to measure multi-day performance.")
+    else:
+        trades = st.session_state["swing_trades"]
+        if trades.empty:
+            st.error("No historical swing trades matched the rules.")
+        else:
+            s = calculate_stats(trades)
+            m = st.columns(4)
+            m[0].metric("Win Rate", f"{s['Win Rate %']:.1f}%")
+            m[1].metric("Trades", s["Trades"])
+            m[2].metric("Expectancy (net)", f"{s['Expectancy R']:+.3f}R")
+            m[3].metric("Profit Factor", f"{s['Profit Factor']:.2f}" if np.isfinite(s["Profit Factor"]) else "∞")
+
+            m = st.columns(4)
+            m[0].metric("Total R", f"{s['Total R']:+.2f}R")
+            m[1].metric("Avg Win / Loss", f"{s['Avg Win R']:+.2f} / {s['Avg Loss R']:+.2f}R")
+            m[2].metric("Max Drawdown", f"{s['Max Drawdown R']:.2f}R")
+            m[3].metric("Return %", f"{s['Return % (non-compounded)']:+.1f}%")
+
+            st.subheader("Cumulative Return % (Non-compounded)")
+            eq = trades.sort_values("exit_date")["R (net)"].cumsum() * RISK_PER_TRADE_PCT
+            st.line_chart(pd.DataFrame({"Cumulative return %": eq.values}))
+
+            st.subheader("📒 Swing Trade Log")
+            st.dataframe(trades, hide_index=True, **STRETCH)
+            st.download_button("⬇️ Download Swing Log CSV", trades.to_csv(index=False).encode("utf-8"),
+                               "swing_backtest_log.csv", "text/csv", **STRETCH)
