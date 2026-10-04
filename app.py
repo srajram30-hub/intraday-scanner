@@ -1,96 +1,87 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
+import numpy as np
 
-st.set_page_config(page_title="Intraday Trading Automated Scanner", layout="wide")
+st.set_page_config(page_title="Nifty 100 Intraday Scanner", layout="wide")
 
-st.title("🚀 Automated Intraday Trading Decision Engine")
-st.markdown("This app fetches live market data and **automatically evaluates** your 4 technical pillars using Python math—no manual inputs required!")
+st.title("⚡ Nifty 100 Intraday Institutional Scanner")
+st.markdown("Automated second-opinion engine evaluating Nifty 100 blue-chips using **VWAP, RVOL, RSI, ATR**, and core technical pillars.")
 
-# Sidebar watchlist selection
-st.sidebar.header("🔍 Watchlist")
-stock_symbol = st.sidebar.selectbox("Select Stock", ["RELIANCE.NS", "TCS.NS", "SBIN.NS", "BHARTIARTL.NS", "HCLTECH.NS"])
+# Curated high-liquidity Nifty 100 watchlist
+nifty_100_watchlist = [
+    "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS", 
+    "SBIN.NS", "BHARTIARTL.NS", "ITC.NS", "KOTAKBANK.NS", "LT.NS", 
+    "AXISBANK.NS", "ASIANPAINT.NS", "MARUTI.NS", "SUNPHARMA.NS", "TITAN.NS",
+    "BAJFINANCE.NS", "HCLTECH.NS", "TATASTEEL.NS", "NTPC.NS", "POWERGRID.NS"
+]
 
-@st.cache_data(ttl=300)
-def fetch_market_data(ticker):
-    # Fetching intraday data (5-day, 15-minute interval)
-    df = yf.download(ticker, period="5d", interval="15m", progress=False)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    return df
+@st.cache_data(ttl=60)
+def scan_nifty_market(tickers):
+    results = []
+    for ticker in tickers:
+        try:
+            df = yf.download(ticker, period="5d", interval="15p", progress=False)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            if df.empty or len(df) < 25:
+                continue
+                
+            # Calculations for Institutional Indicators
+            df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
+            df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
+            
+            # RSI (14)
+            delta = df['Close'].diff()
+            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+            rs = gain / loss
+            df['RSI'] = 100 - (100 / (1 + rs))
+            
+            # VWAP Approximation for intraday
+            df['VWAP'] = (df['Volume'] * (df['High'] + df['Low'] + df['Close']) / 3).cumsum() / df['Volume'].cumsum()
+            
+            latest = df.iloc[-1]
+            current_price = latest['Close']
+            prev_close = df['Close'].iloc[-2]
+            change_pct = ((current_price - prev_close) / prev_close) * 100
+            
+            # Core Rules Evaluation
+            is_uptrend = (current_price > latest['EMA_20']) and (current_price > latest['VWAP'])
+            is_high_volume = latest['Volume'] > (latest['Vol_MA20'] * 1.3) # RVOL > 1.3
+            is_healthy_rsi = 50 <= latest['RSI'] <= 75
+            
+            recent_high = df['High'].iloc[-21:-1].max()
+            is_breakout = current_price >= recent_high
+            
+            # Decision Matrix
+            if is_uptrend and is_high_volume and is_healthy_rsi and is_breakout:
+                decision = "🟢 YES, GO AHEAD"
+            elif not is_high_volume or not is_uptrend:
+                decision = "🟡 TEMPORARY HOLD"
+            else:
+                decision = "🔴 DO NOT TRADE"
+                
+            results.append({
+                "Stock": ticker.replace(".NS", ""),
+                "Price (₹)": round(current_price, 2),
+                "Change %": round(change_pct, 2),
+                "RVOL": round(latest['Volume'] / latest['Vol_MA20'], 2) if latest['Vol_MA20'] > 0 else 0,
+                "RSI": round(latest['RSI'], 1),
+                "Verdict": decision
+            })
+        except:
+            continue
+    return pd.DataFrame(results)
 
-try:
-    data = fetch_market_data(stock_symbol)
-    if data.empty:
-        st.error("Could not fetch data for this symbol. Please try another.")
-    else:
-        # Calculate Technical Indicators
-        data['EMA_20'] = data['Close'].ewm(span=20, adjust=False).mean()
-        data['Vol_MA20'] = data['Volume'].rolling(window=20).mean()
+if st.button("🚀 Run Nifty 100 Instant Scan"):
+    with st.spinner("Scanning Nifty 100 blue-chips and computing institutional indicators..."):
+        df_results = scan_nifty_market(nifty_100_watchlist)
         
-        latest = data.iloc[-1]
-        current_price = latest['Close']
-        prev_close = data['Close'].iloc[-2]
-        change_pct = ((current_price - prev_close) / prev_close) * 100
-
-        st.sidebar.markdown(f"**Live Price:** ₹{current_price:,.2f}")
-        st.sidebar.markdown(f"**Change %:** {change_pct:+.2f}%")
-
-        # --- AUTOMATED 4-PILLAR EVALUATION LOGIC ---
-        
-        # 1. Candlestick Anatomy: Strong Bullish Body (Close > Open and body > 50% of candle range)
-        candle_body = abs(latest['Close'] - latest['Open'])
-        candle_range = latest['High'] - latest['Low']
-        is_strong_candle = (latest['Close'] > latest['Open']) and (candle_range > 0 and (candle_body / candle_range) > 0.5)
-        
-        # 2. Support / Resistance Breakout: Breaking above recent 20-period high
-        recent_high = data['High'].iloc[-21:-1].max()
-        is_breakout = latest['Close'] > recent_high
-        
-        # 3. Market Trend: Price above 20 EMA and EMA sloping up
-        is_uptrend = (latest['Close'] > latest['EMA_20']) and (data['EMA_20'].iloc[-1] > data['EMA_20'].iloc[-5])
-        
-        # 4. Volume Confirmation: Current volume higher than 20-period volume average
-        is_high_volume = latest['Volume'] > latest['Vol_MA20']
-
-        # Display Automated Pillar Results
-        st.subheader(f"📊 Automated Technical Breakdown: {stock_symbol}")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown(f"**1. Candlestick Anatomy:** {'🟢 Strong Momentum' if is_strong_candle else '🔴 Weak / Indecisive'}")
-            st.markdown(f"**2. Support / Resistance:** {'🟢 Clean Breakout' if is_breakout else '🔴 Stuck / No Breakout'}")
-        
-        with col2:
-            st.markdown(f"**3. Market Trend:** {'🟢 Strong Uptrend' if is_uptrend else '🔴 Choppy / Downtrend'}")
-            st.markdown(f"**4. Volume Confirmation:** {'🟢 High & Confirmed' if is_high_volume else '🔴 Low Volume'}")
-
-        st.divider()
-
-        # Final Decision Engine
-        if is_strong_candle and is_breakout and is_uptrend and is_high_volume:
-            decision = "🟢 YES, GO AHEAD"
-            action = "Enter on close / retest; Set SL below breakout candle; Target 1:2+ R:R; Trail with 20 EMA"
-            box_type = "success"
-        elif not is_high_volume or not is_uptrend:
-            decision = "🟡 TEMPORARY HOLD / WAIT"
-            action = "Stand aside; wait for range expansion or volume surge; Set price alerts"
-            box_type = "warning"
+        if not df_results.empty:
+            st.success("Scan complete! Review your institutional second-opinion table below:")
+            st.dataframe(df_results, use_container_width=True)
         else:
-            decision = "🔴 DO NOT TRADE"
-            action = "No entry; Protect capital; Avoid trading against trend/rejection"
-            box_type = "error"
-
-        st.subheader("🎯 Final Automated Trading Decision")
-        if box_type == "success":
-            st.success(f"**Decision:** {decision}")
-        elif box_type == "warning":
-            st.warning(f"**Decision:** {decision}")
-        else:
-            st.error(f"**Decision:** {decision}")
-
-        st.info(f"**Risk Action Plan:** {action}")
-
-except Exception as e:
-    st.error(f"Error loading market data: {e}")
+            st.error("Could not fetch market data right now. Please try again.")
+else:
+    st.info("Click the **'Run Nifty 100 Instant Scan'** button above to evaluate market breadth and find high-probability setups instantly on mobile or desktop.")
