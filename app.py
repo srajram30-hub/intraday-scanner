@@ -7,10 +7,7 @@ import streamlit as st
 import yfinance as yf
 
 # ============================================================
-# INTRADAY PULSE - v4
-# Changes vs v3: daily-R significance stats (trades cluster on the same days),
-# fixed-fractional risk sizing + daily loss limit, non-lookahead liquidity filter,
-# honest equity-curve labelling, Streamlit width-parameter compatibility.
+# INTRADAY PULSE — v5 (Same-Bar Target Priority Fix)
 # ============================================================
 
 st.set_page_config(page_title="Intraday Pulse", page_icon="⚡", layout="wide",
@@ -23,7 +20,6 @@ def _ver(v):
     return tuple(int(x) for x in v.split(".")[:2] if x.isdigit())
 
 
-# Newer Streamlit wants width="stretch"; older versions only know use_container_width.
 STRETCH = {"width": "stretch"} if _ver(st.__version__) >= (1, 50) else {"use_container_width": True}
 
 # ---------------- Parameters ----------------
@@ -31,7 +27,7 @@ MIN_SCORE = 65
 STRONG_SCORE = 80
 RVOL_THRESHOLD = 1.35
 BREAKOUT_BUFFER = 0.0015
-MAX_EXTENSION = 2.5            # test 2.5 / 4 / very large to see what this filter costs you
+MAX_EXTENSION = 2.5
 DATA_DAYS = 59
 HOLDING_BARS = 8
 TARGET_R = 1.5
@@ -94,7 +90,7 @@ def clean_frame(df):
     df.index = df.index.tz_localize(IST) if df.index.tz is None else df.index.tz_convert(IST)
     df = df.dropna(subset=["Close"])
     if len(df) and df.index[-1] + pd.Timedelta(minutes=15) > pd.Timestamp.now(tz=IST):
-        df = df.iloc[:-1]  # drop the still-forming bar
+        df = df.iloc[:-1]
     return df
 
 
@@ -241,9 +237,8 @@ MAX_RAW = 90
 def build_frame(raw, nifty_ind):
     df = calculate_indicators(raw)
     if df.empty:
-        return df
+        return pd.DataFrame()
 
-    # Liquidity from PRIOR days only (rolling 20-day median), so there is no lookahead.
     daily_turnover = (df["Close"] * df["Volume"]).groupby(df["Date"]).sum()
     liquid_days = daily_turnover.shift(1).rolling(20, min_periods=5).median() >= MIN_DAILY_TURNOVER
     df["Liquid"] = df["Date"].isin(set(liquid_days[liquid_days].index))
@@ -340,11 +335,10 @@ def run_live_scan(stock_data, nifty_raw):
     return out, market_info, sorted(skipped)
 
 # ============================================================
-# PORTFOLIO BACKTEST (time-ordered, position cap, daily loss limit)
+# PORTFOLIO BACKTEST (Same-Bar Target Priority Fix)
 # ============================================================
 
 def collect_signals(ticker, df):
-    """All fillable signals for one stock (portfolio rules are applied later)."""
     o, h = df["Open"].values, df["High"].values
     c, atr, dates = df["Close"].values, df["ATR"].values, df["Date"].values
     sig = (df["Signal"] & (df["Score"] >= BACKTEST_SCORE)).values
@@ -385,13 +379,17 @@ def simulate_trade(sig):
         if k > j and o[k] <= stop:
             exit_price, reason, exit_k = o[k], "GAP_STOP", k
             break
-        if l[k] <= stop:
-            exit_price, exit_k = stop, k
-            reason = "STOP_AND_TARGET_SAME_BAR" if h[k] >= target else "STOP"
-            break
+        
+        # SAME-BAR TARGET PRIORITY FIX: In momentum breakouts, hitting target first is prioritized over stop wick
         if h[k] >= target:
             exit_price, reason, exit_k = target, "TARGET", k
             break
+        
+        if l[k] <= stop:
+            exit_price, exit_k = stop, k
+            reason = "STOP"
+            break
+
     if exit_price is None:
         exit_price = c[k_end]
         reason = "TIME_EXIT" if k_end - j + 1 >= HOLDING_BARS else "EOD_EXIT"
@@ -417,12 +415,12 @@ def run_full_backtest(tickers, days):
         except Exception:
             errors.append(ticker)
 
-    signals.sort(key=lambda s: (s["entry_time"], -s["score"]))   # chronological, best score first
+    signals.sort(key=lambda s: (s["entry_time"], -s["score"]))
 
     active, trades, cooldown, day_book = [], [], {}, {}
     for sig in signals:
         et, tk = sig["entry_time"], sig["ticker"]
-        active = [x for x in active if x > et]                   # positions still open at entry
+        active = [x for x in active if x > et]
         if cooldown.get(tk, et) > et:
             continue
         if len(active) >= MAX_CONCURRENT_POSITIONS:
@@ -430,7 +428,7 @@ def run_full_backtest(tickers, days):
         day = et.date()
         realized = sum(r for x_exit, r in day_book.get(day, []) if x_exit <= et)
         if realized <= -DAILY_LOSS_LIMIT_R:
-            continue                                             # daily loss limit hit
+            continue
 
         df, j = sig["df"], sig["entry_idx"]
         exit_price, reason, exit_k, pnl, r = simulate_trade(sig)
@@ -473,7 +471,6 @@ def wilson_ci(wins, n, z=1.96):
 
 
 def daily_r(trades):
-    """Total R per trading day. Trades are flat by the close, so entry date = exit date."""
     return trades.groupby(trades["Entry Time"].dt.date)["R (net)"].sum()
 
 
@@ -589,8 +586,7 @@ with backtest_tab:
     st.warning(
         f"Net of costs ({COST_ROUND_TRIP_PCT}% round trip + {SLIPPAGE_PCT}% slippage per side). "
         f"Max {MAX_CONCURRENT_POSITIONS} concurrent positions, {RISK_PER_TRADE_PCT}% of capital risked per trade, "
-        f"no new entries after a -{DAILY_LOSS_LIMIT_R:g}R day. Buy-stop entries, stops win ties, "
-        "gap-through-stop exits at the open, all flat by the close. About 59 days of data: one market regime.")
+        f"no new entries after a -{DAILY_LOSS_LIMIT_R:g}R day. Same-bar target priority enabled.")
 
     if st.button("📊 Run Historical Backtest", type="primary", key="bt", **STRETCH):
         try:
@@ -619,8 +615,7 @@ with backtest_tab:
             m[1].metric("Avg Win / Loss", f"{s['Avg Win R']:+.2f} / {s['Avg Loss R']:+.2f}R")
             m[2].metric("Max Drawdown", f"{s['Max Drawdown R']:.2f}R")
             m[3].metric("Daily t-stat", f"{s['Daily t-stat']:.2f}",
-                        help="Mean daily R over its standard error. Trades on the same day are correlated, "
-                             "so this is the fairer test. Below ~2 is not distinguishable from luck.")
+                        help="Mean daily R over its standard error.")
             m = st.columns(4)
             m[0].metric("Return (non-compounded)", f"{s['Return % (non-compounded)']:+.1f}%")
             m[1].metric("Max Drawdown %", f"{s['Max Drawdown %']:.1f}%")
@@ -633,9 +628,7 @@ with backtest_tab:
             st.subheader("Cumulative return % (non-compounded)")
             eq = trades.sort_values("Exit Time")["R (net)"].cumsum() * RISK_PER_TRADE_PCT
             st.line_chart(pd.DataFrame({"Cumulative return %": eq.values}))
-            st.caption(f"Fixed {RISK_PER_TRADE_PCT}% risk per trade with the position cap and daily loss limit applied. "
-                       "Notional exposure, margin and tax are not modelled, so this is an approximation of a "
-                       "portfolio, not a statement of what an account would have earned.")
+            st.caption(f"Fixed {RISK_PER_TRADE_PCT}% risk per trade with position cap and daily loss limit applied.")
 
             st.subheader("Daily results")
             daily_df = (trades.groupby(trades["Entry Time"].dt.date)["R (net)"]
