@@ -6,7 +6,7 @@ from datetime import datetime
 import time
 
 # ============================================================
-# INTRADAY PULSE — STREAMLINED FULL VERSION (SCANNER + BACKTEST)
+# INTRADAY PULSE — OPTIMIZED INSTITUTIONAL VERSION
 # ============================================================
 
 st.set_page_config(
@@ -17,20 +17,20 @@ st.set_page_config(
 )
 
 # ============================================================
-# OPTIMAL PRE-SET PARAMETERS (No setup tools required)
+# OPTIMIZED INSTITUTIONAL PRE-SET PARAMETERS (No setup tools)
 # ============================================================
 
-MIN_SCORE = 55
-STRONG_SCORE = 80
-RVOL_THRESHOLD = 1.30
+MIN_SCORE = 60
+STRONG_SCORE = 85
+RVOL_THRESHOLD = 1.50     # Increased to 1.5x for heavier volume filtering
 BREAKOUT_BUFFER = 0.0015  # 0.15%
-MAX_EXTENSION = 3.0       # 3% max 5-bar extension
+MAX_EXTENSION = 2.5       # Tighter extension limit (2.5%)
 DATA_DAYS = 60
 HOLDING_BARS = 8
 TARGET_R = 2.0
-BACKTEST_SCORE = 80
-ENTRY_BUFFER = 0.0
-MIN_BARS_BETWEEN_TRADES = 4
+BACKTEST_SCORE = 85       # Raised to 85 to eliminate low-quality over-trading
+ENTRY_BUFFER = 0.001      # Minor buffer to filter out fake breakouts
+MIN_BARS_BETWEEN_TRADES = 6
 
 MASTER_WATCHLIST = [
     "HFCL.NS", "RBLBANK.NS", "CUB.NS", "SAILIFE.NS", "AEGISLOG.NS",
@@ -733,7 +733,6 @@ with scan_tab:
         st.markdown("---")
         st.subheader("📋 Master Stock Information Table (All Scanned Stocks)")
         
-        # Display ALL scanned stocks so user can inspect every single stock's data
         st.dataframe(results, use_container_width=True, hide_index=True)
 
         st.download_button(
@@ -750,7 +749,7 @@ with scan_tab:
 
 with backtest_tab:
     st.subheader("📈 Historical Strategy Backtest Engine")
-    st.warning("Backtest simulates strategy performance across historical 15-minute data.")
+    st.warning("Backtest simulates strategy performance across historical 15-minute data with optimized institutional filters.")
 
     if st.button("📊 Run Historical Backtest", use_container_width=True, type="primary"):
         with st.spinner("Running historical event-by-event backtest across all stocks..."):
@@ -766,7 +765,7 @@ with backtest_tab:
         trades = st.session_state["backtest_trades"]
 
         if trades.empty:
-            st.error("No historical trades matched the current rules.")
+            st.error("No historical trades matched the current institutional rules.")
         else:
             stats = calculate_backtest_stats(trades)
 
