@@ -7,7 +7,7 @@ import streamlit as st
 import yfinance as yf
 
 # ============================================================
-# INTRADAY PULSE — 30-MIN PRECISION WINDOW EDITION
+# INTRADAY PULSE — 30-MIN PRECISION WINDOW EDITION (Corrected 3-Bar Timing)
 # ============================================================
 
 st.set_page_config(page_title="Intraday Pulse", page_icon="⚡", layout="wide",
@@ -22,19 +22,19 @@ def _ver(v):
 
 STRETCH = {"width": "stretch"} if _ver(st.__version__) >= (1, 50) else {"use_container_width": True}
 
-# ---------------- Parameters (30-Min Interval, 1.5h Hold, 10:00-2:00 Window) ----------------
+# ---------------- Parameters (Corrected for Full 3-Bar / 1.5h Hold) ----------------
 MIN_SCORE = 65
 STRONG_SCORE = 80
 RVOL_THRESHOLD = 1.35
 BREAKOUT_BUFFER = 0.0015
 MAX_EXTENSION = 2.5
 DATA_DAYS = 59
-HOLDING_BARS = 3               # 3 bars x 30m = 1.5 hours holding time
+HOLDING_BARS = 3               # Exactly 3 bars x 30m = 1.5 hours holding time
 TARGET_R = 1.5
 BACKTEST_SCORE = 80
 ENTRY_BUFFER = 0.001
 SKIP_OPEN_BARS = 2             # Skip 9:15 & 9:45 bars (entries start after 10:00 AM)
-LAST_SIGNAL_TIME = "14:00"     # No entries after 2:00 PM
+LAST_SIGNAL_TIME = "13:30"     # Corrected: Signal at 13:30 -> Entry at 14:00 -> Full 3 bars to 15:30
 COOLDOWN_BARS = 2
 MIN_DAILY_TURNOVER = 5e7
 SLIPPAGE_PCT = 0.05
@@ -537,14 +537,14 @@ def split_stats(trades):
 # ============================================================
 
 st.markdown("# ⚡ Intraday Pulse")
-st.caption("30-Minute Interval + Daily Gatekeeper Edition (1.5-Hour Hold, 10:00-2:00 Window).")
+st.caption("30-Min Interval + Daily Gatekeeper (Entry Window: 10:00 - 13:30, Full 3-Bar / 1.5h Hold).")
 
 scan_tab, backtest_tab = st.tabs(["🚀 Live Scanner", "📈 Backtest"])
 
 with scan_tab:
     if st.button("🚀 Run Instant Market Scan", type="primary", key="scan", **STRETCH):
         try:
-            with st.spinner(f"Scanning {len(MASTER_WATCHLIST)} 30-minute charts with Daily Filter..."):
+            with st.spinner(f"Scanning {len(MASTER_WATCHLIST)} 30-minute charts..."):
                 stock_data, dl_errors = download_market_data(tuple(MASTER_WATCHLIST), DATA_DAYS)
                 nifty = download_nifty(DATA_DAYS)
                 results, market_info, skipped = run_live_scan(stock_data, nifty)
@@ -576,7 +576,7 @@ with scan_tab:
 
 with backtest_tab:
     st.subheader("📈 30-Minute Strategy Backtest")
-    st.warning("Net of costs. 30-minute interval with 1.5-hour holding period (3 bars) and 10:00-2:00 entry window.")
+    st.warning("Net of costs. Entry window 10:00 - 13:30, full 3-bar (1.5h) hold time before market close.")
 
     if st.button("📊 Run Historical Backtest", type="primary", key="bt", **STRETCH):
         try:
