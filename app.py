@@ -354,7 +354,6 @@ def market_regime_at(nifty, i):
 
 # ============================================================
 # SCORE AT A HISTORICAL BAR
-# IMPORTANT: ONLY DATA UP TO BAR i IS USED.
 # ============================================================
 
 def score_at(df, nifty, i):
@@ -642,7 +641,720 @@ def run_live_scan(stock_data, nifty):
 # ============================================================
 
 def backtest_stock(ticker, raw_df, nifty_raw):
-    """
-    Event-driven backtest.
+    df = calculate_indicators(raw_df)
+    nifty = prepare_nifty(nifty_raw)
 
-    Signal is evaluated at the CLOSE of b
+    if df.empty or nifty.empty or len(df) < 50:
+    def backtest_stock(ticker, raw_df, nifty_raw):
+    df = calculate_indicators(raw_df)
+    nifty = prepare_nifty(nifty_raw)
+
+    if df.empty or nifty.empty or len(df) < 50:
+        return []
+
+    trades = []
+    last_trade_i = -9999
+
+    for i in range(35, len(df) - 1 - HOLDING_BARS):
+
+        if i - last_trade_i <= MIN_BARS_BETWEEN_TRADES:
+            continue
+
+        signal = score_at(df, nifty, i)
+        if signal is None:
+            continue
+
+        if signal["score"] < BACKTEST_SCORE:
+            continue
+
+        if not signal["breakout"]:
+            continue
+
+        if signal["extension"] > MAX_EXTENSION:
+            continue
+
+        entry_index = i + 1
+        entry_time = df.index[entry_index]
+        entry = float(df["Open"].iloc[entry_index])
+
+        if ENTRY_BUFFER > 0:
+            entry = max(
+                entry,
+                signal["price"] * (1 + ENTRY_BUFFER)
+            )
+
+        stop, target, risk = trade_levels(
+            df,
+            i,
+            entry,
+            signal["atr"],
+            TARGET_R
+        )
+
+        exit_price = None
+        exit_time = None
+        exit_reason = None
+        bars_held = 0
+
+        end = min(
+            entry_index + HOLDING_BARS,
+            len(df) - 1
+        )
+
+        for j in range(entry_index, end + 1):
+            high = float(df["High"].iloc[j])
+            low = float(df["Low"].iloc[j])
+
+            if low <= stop and high >= target:
+                exit_price = stop
+                exit_reason = "STOP_AND_TARGET_SAME_BAR"
+                exit_time = df.index[j]
+                bars_held = j - entry_index + 1
+                break
+
+            if low <= stop:
+                exit_price = stop
+                exit_reason = "STOP"
+                exit_time = df.index[j]
+                bars_held = j - entry_index + 1
+                break
+
+            if high >= target:
+                exit_price = target
+                exit_reason = "TARGET"
+                exit_time = df.index[j]
+                bars_held = j - entry_index + 1
+                break
+
+        if exit_price is None:
+            j = end
+            exit_price = float(df["Close"].iloc[j])
+            exit_time = df.index[j]
+            bars_held = j - entry_index + 1
+            exit_reason = "TIME_EXIT"
+
+        pnl = exit_price - entry
+        r_multiple = pnl / risk if risk > 0 else 0
+
+        if r_multiple > 0:
+            outcome = "WIN"
+        elif r_multiple < 0:
+            outcome = "LOSS"
+        else:
+            outcome = "BREAKEVEN"
+
+        trades.append({
+            "Stock": ticker.replace(".NS", ""),
+            "Signal Time": df.index[i],
+            "Entry Time": entry_time,
+            "Exit Time": exit_time,
+            "Score": signal["score"],
+            "Entry": round(entry, 2),
+            "Stop": round(stop, 2),
+            "Target": round(target, 2),
+            "Exit": round(exit_price, 2),
+            "R": round(r_multiple, 3),
+            "P&L/Share": round(pnl, 2),
+            "Outcome": outcome,
+            "Exit Reason": exit_reason,
+            "Bars Held": bars_held,
+            "RSI": round(signal["rsi"], 1),
+            "RVOL": round(signal["rvol"], 2),
+            "RS vs NIFTY": round(signal["rs"], 2),
+            "5-Bar Move %": round(signal["extension"], 2),
+            "Market": signal["market_regime"]
+        })
+
+        last_trade_i = i
+
+    return trades
+
+# ============================================================
+# COMPLETE BACKTEST
+# ============================================================
+
+@st.cache_data(ttl=300, show_spinner=False)
+def run_full_backtest(tickers, days):
+    stock_data, download_errors = download_market_data(
+        tickers, days
+    )
+    nifty = download_nifty(days)
+
+    all_trades = []
+    errors = list(download_errors)
+
+    for ticker, raw in stock_data.items():
+        try:
+            trades = backtest_stock(
+                ticker,
+                raw,
+                nifty
+            )
+            all_trades.extend(trades)
+        except Exception:
+            errors.append(ticker)
+
+    trades_df = pd.DataFrame(all_trades)
+
+    if not trades_df.empty:
+        trades_df = trades_df.sort_values(
+            "Signal Time"
+        ).reset_index(drop=True)
+
+    return trades_df, sorted(set(errors))
+
+# ============================================================
+# BACKTEST STATISTICS
+# ============================================================
+
+def calculate_backtest_stats(trades):
+    if trades.empty:
+        return {}
+
+    total = len(trades)
+    wins = int((trades["Outcome"] == "WIN").sum())
+    losses = int((trades["Outcome"] == "LOSS").sum())
+    breakeven = int((trades["Outcome"] == "BREAKEVEN").sum())
+
+    win_rate = wins / total * 100
+
+    gross_profit = trades.loc[
+        trades["R"] > 0, "R"
+    ].sum()
+
+    gross_loss = abs(
+        trades.loc[
+            trades["R"] < 0, "R"
+        ].sum()
+    )
+
+    profit_factor = (
+        gross_profit / gross_loss
+        if gross_loss > 0 else np.inf
+    )
+
+    expectancy = trades["R"].mean()
+
+    avg_win = (
+        trades.loc[trades["R"] > 0, "R"].mean()
+        if wins else 0
+    )
+
+    avg_loss = (
+        trades.loc[trades["R"] < 0, "R"].mean()
+        if losses else 0
+    )
+
+    cumulative_r = trades["R"].cumsum()
+    peak = cumulative_r.cummax()
+    drawdown = cumulative_r - peak
+    max_drawdown = abs(drawdown.min())
+
+    return {
+        "Trades": total,
+        "Wins": wins,
+        "Losses": losses,
+        "Breakeven": breakeven,
+        "Win Rate %": win_rate,
+        "Avg Win R": avg_win,
+        "Avg Loss R": avg_loss,
+        "Profit Factor": profit_factor,
+        "Expectancy R/Trade": expectancy,
+        "Total R": trades["R"].sum(),
+        "Max Drawdown R": max_drawdown
+    }
+
+# ============================================================
+# UI
+# ============================================================
+
+st.markdown(
+    '<div class="main-title">⚡ Intraday Pulse V4</div>',
+    unsafe_allow_html=True
+)
+
+st.markdown(
+    '<div class="subtitle">'
+    'Mobile Momentum & Breakout Scanner + Historical Backtest Engine'
+    '</div>',
+    unsafe_allow_html=True
+)
+
+scan_tab, backtest_tab = st.tabs([
+    "🚀 Live Scanner",
+    "📈 Backtest"
+])
+
+# ============================================================
+# LIVE SCANNER TAB
+# ============================================================
+
+with scan_tab:
+
+    if st.button(
+        "🚀 Run Mobile Scan",
+        use_container_width=True,
+        type="primary"
+    ):
+
+        with st.spinner(
+            f"Scanning {len(MASTER_WATCHLIST)} stocks..."
+        ):
+            stock_data, errors = download_market_data(
+                tuple(MASTER_WATCHLIST),
+                DATA_DAYS
+            )
+            nifty = download_nifty(DATA_DAYS)
+            results, market_info = run_live_scan(
+                stock_data,
+                nifty
+            )
+
+        st.session_state["live_results"] = results
+        st.session_state["live_errors"] = errors
+        st.session_state["market_info"] = market_info
+        st.session_state["scan_time"] = datetime.now()
+
+    if "live_results" not in st.session_state:
+
+        st.info(
+            f"Click Run Mobile Scan to scan your "
+            f"{len(MASTER_WATCHLIST)}-stock universe."
+        )
+
+    else:
+
+        results = st.session_state["live_results"]
+        market_info = st.session_state["market_info"]
+
+        st.markdown(
+            f"""
+            <div style="
+                padding:15px;border-radius:15px;
+                background:#111820;color:white;margin-bottom:15px;
+            ">
+            <h3 style="margin:0;">
+            Market Regime: {market_info["regime"]}
+            </h3>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        display = results[
+            results["Score"] >= MIN_SCORE
+        ].copy()
+
+        if not SHOW_WATCH:
+            display = display[
+                display["Score"] >= STRONG_SCORE
+            ]
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Scanned", len(MASTER_WATCHLIST))
+        c2.metric("Qualified", len(display))
+        c3.metric(
+            "Strong",
+            int((results["Score"] >= STRONG_SCORE).sum())
+        )
+        c4.metric(
+            "Breakouts",
+            int((results["Breakout"] == "YES").sum())
+        )
+
+        if display.empty:
+            st.warning(
+                "No setups currently match your filters."
+            )
+
+        for _, row in display.iterrows():
+
+            score = int(row["Score"])
+
+            score_class = (
+                "green" if score >= STRONG_SCORE
+                else "yellow" if score >= MIN_SCORE
+                else "red"
+            )
+
+            change_class = (
+                "positive" if row["Change %"] >= 0
+                else "negative"
+            )
+
+            st.markdown(
+                f"""
+                <div class="stock-card">
+                    <div class="stock-header">
+                        <div class="stock-name">
+                            {row["Stock"]}
+                        </div>
+                        <div class="score {score_class}">
+                            {score}/100
+                        </div>
+                    </div>
+
+                    <div style="margin-top:12px;">
+                        <span class="price">
+                            ₹{row["Price"]:,.2f}
+                        </span>
+                        <span class="{change_class}"
+                              style="margin-left:15px;">
+                            {row["Change %"]:+.2f}%
+                        </span>
+                    </div>
+
+                    <div style="
+                        margin-top:10px;
+                        font-size:17px;
+                        font-weight:700;
+                    ">
+                        {row["Verdict"]}
+                    </div>
+
+                    <div style="margin-top:8px;">
+                        <b>{row["Status"]}</b>
+                    </div>
+
+                    <div class="info-row">
+                        <div>
+                            <div class="label">ENTRY</div>
+                            <div class="value">
+                                ₹{row["Entry"]:,.2f}
+                            </div>
+                        </div>
+                        <div>
+                            <div class="label">STOP LOSS</div>
+                            <div class="value">
+                                ₹{row["Stop Loss"]:,.2f}
+                            </div>
+                        </div>
+                        <div>
+                            <div class="label">TARGET</div>
+                            <div class="value">
+                                ₹{row["Target"]:,.2f}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="info-row">
+                        <div>
+                            <div class="label">R:R</div>
+                            <div class="value">
+                                1 : {row["R:R"]:.1f}
+                            </div>
+                        </div>
+                        <div>
+                            <div class="label">RVOL</div>
+                            <div class="value">
+                                {row["RVOL"]:.1f}x
+                            </div>
+                        </div>
+                        <div>
+                            <div class="label">RSI</div>
+                            <div class="value">
+                                {row["RSI"]:.1f}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+            with st.expander(
+                f"📊 {row['Stock']} — Details"
+            ):
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("RSI", row["RSI"])
+                c2.metric("RVOL", f'{row["RVOL"]:.1f}x')
+                c3.metric(
+                    "RS vs NIFTY",
+                    f'{row["Relative Strength"]:+.2f}%'
+                )
+                c4.metric(
+                    "VWAP Distance",
+                    f'{row["VWAP Distance %"]:+.2f}%'
+                )
+
+                st.write(
+                    "**Why:**",
+                    row["Why Score?"]
+                )
+
+                st.write(
+                    "**Risks:**",
+                    row["Risks"]
+                )
+
+        st.markdown("---")
+        st.subheader("📋 Scanner Table")
+
+        st.dataframe(
+            display,
+            use_container_width=True,
+            hide_index=True
+        )
+
+        st.download_button(
+            "⬇️ Download Scanner CSV",
+            display.to_csv(index=False).encode("utf-8"),
+            "intraday_pulse_v4_scan.csv",
+            "text/csv",
+            use_container_width=True
+        )
+
+# ============================================================
+# BACKTEST TAB
+# ============================================================
+
+with backtest_tab:
+
+    st.subheader("📈 Historical Strategy Backtest")
+
+    st.warning(
+        "Backtest assumptions: signal is generated at the "
+        "15-minute candle close, entry is at the next candle open, "
+        "and if stop + target are both touched in the same candle, "
+        "the stop is assumed to occur first. This is conservative."
+    )
+
+    st.write(
+        f"""
+        **Current backtest configuration**
+
+        - Minimum score: **{BACKTEST_SCORE}/100**
+        - Target: **{TARGET_R:.1f}R**
+        - Maximum holding period: **{HOLDING_BARS} candles**
+        - Candle size: **15 minutes**
+        - Maximum extension: **{MAX_EXTENSION:.1f}%**
+        - Universe: **{len(MASTER_WATCHLIST)} stocks**
+        """
+    )
+
+    if st.button(
+        "📊 Run Historical Backtest",
+        use_container_width=True,
+        type="primary"
+    ):
+
+        with st.spinner(
+            "Running historical event-by-event backtest..."
+        ):
+            trades, errors = run_full_backtest(
+                tuple(MASTER_WATCHLIST),
+                DATA_DAYS
+            )
+
+        st.session_state["backtest_trades"] = trades
+        st.session_state["backtest_errors"] = errors
+        st.session_state["backtest_time"] = datetime.now()
+
+    if "backtest_trades" not in st.session_state:
+
+        st.info(
+            "Run the backtest to measure actual historical "
+            "win rate, expectancy, profit factor and drawdown."
+        )
+
+    else:
+
+        trades = st.session_state["backtest_trades"]
+
+        if trades.empty:
+
+            st.error(
+                "No historical trades matched the current rules. "
+                "Try lowering the backtest score or increasing "
+                "the historical period."
+            )
+
+        else:
+
+            stats = calculate_backtest_stats(trades)
+
+            st.subheader("🎯 Backtest Results")
+
+            c1, c2, c3, c4 = st.columns(4)
+
+            c1.metric(
+                "Win Rate",
+                f'{stats["Win Rate %"]:.1f}%'
+            )
+
+            c2.metric(
+                "Trades",
+                stats["Trades"]
+            )
+
+            c3.metric(
+                "Expectancy",
+                f'{stats["Expectancy R/Trade"]:+.3f}R'
+            )
+
+            c4.metric(
+                "Profit Factor",
+                f'{stats["Profit Factor"]:.2f}'
+                if np.isfinite(stats["Profit Factor"])
+                else "∞"
+            )
+
+            c1, c2, c3, c4 = st.columns(4)
+
+            c1.metric(
+                "Total R",
+                f'{stats["Total R"]:+.2f}R'
+            )
+
+            c2.metric(
+                "Average Win",
+                f'{stats["Avg Win R"]:+.2f}R'
+            )
+
+            c3.metric(
+                "Average Loss",
+                f'{stats["Avg Loss R"]:+.2f}R'
+            )
+
+            c4.metric(
+                "Max Drawdown",
+                f'{stats["Max Drawdown R"]:.2f}R'
+            )
+
+            expectancy = stats["Expectancy R/Trade"]
+
+            if expectancy > 0.30:
+                st.success(
+                    f"Positive historical expectancy: "
+                    f"{expectancy:+.3f}R per trade."
+                )
+            elif expectancy > 0:
+                st.info(
+                    f"Positive but modest expectancy: "
+                    f"{expectancy:+.3f}R per trade."
+                )
+            else:
+                st.error(
+                    f"Negative historical expectancy: "
+                    f"{expectancy:+.3f}R per trade."
+                )
+
+            st.subheader("📈 Equity Curve (R)")
+
+            equity = trades["R"].cumsum()
+
+            chart_df = pd.DataFrame({
+                "Cumulative R": equity.values
+            })
+
+            st.line_chart(chart_df)
+
+            st.subheader("🔬 Does a Higher Score Actually Work Better?")
+
+            score_bins = [
+                0, 59, 69, 79, 89, 100
+            ]
+
+            score_labels = [
+                "<60",
+                "60–69",
+                "70–79",
+                "80–89",
+                "90–100"
+            ]
+
+            trades["Score Bucket"] = pd.cut(
+                trades["Score"],
+                bins=score_bins,
+                labels=score_labels,
+                include_lowest=True
+            )
+
+            score_analysis = (
+                trades.groupby(
+                    "Score Bucket",
+                    observed=False
+                )
+                .agg(
+                    Trades=("R", "count"),
+                    Win_Rate=("Outcome",
+                              lambda x: (x == "WIN").mean() * 100),
+                    Avg_R=("R", "mean"),
+                    Total_R=("R", "sum")
+                )
+                .reset_index()
+            )
+
+            score_analysis["Win_Rate"] = (
+                score_analysis["Win_Rate"].round(1)
+            )
+            score_analysis["Avg_R"] = (
+                score_analysis["Avg_R"].round(3)
+            )
+            score_analysis["Total_R"] = (
+                score_analysis["Total_R"].round(2)
+            )
+
+            st.dataframe(
+                score_analysis,
+                use_container_width=True,
+                hide_index=True
+            )
+
+            st.subheader("🧪 Exit Analysis")
+
+            exit_analysis = (
+                trades.groupby("Exit Reason")
+                .agg(
+                    Trades=("R", "count"),
+                    Avg_R=("R", "mean"),
+                    Total_R=("R", "sum")
+                )
+                .reset_index()
+            )
+
+            st.dataframe(
+                exit_analysis,
+                use_container_width=True,
+                hide_index=True
+            )
+
+            st.subheader("🏆 Best / Worst Stocks")
+
+            stock_analysis = (
+                trades.groupby("Stock")
+                .agg(
+                    Trades=("R", "count"),
+                    Win_Rate=("Outcome",
+                              lambda x: (x == "WIN").mean() * 100),
+                    Avg_R=("R", "mean"),
+                    Total_R=("R", "sum")
+                )
+                .reset_index()
+            )
+
+            stock_analysis["Win_Rate"] = (
+                stock_analysis["Win_Rate"].round(1)
+            )
+            stock_analysis["Avg_R"] = (
+                stock_analysis["Avg_R"].round(3)
+            )
+            stock_analysis["Total_R"] = (
+                stock_analysis["Total_R"].round(2)
+            )
+
+            stock_analysis = stock_analysis.sort_values(
+                "Total_R",
+                ascending=False
+            )
+
+            st.dataframe(
+                stock_analysis,
+                use_container_width=True,
+                hide_index=True
+            )
+
+            st.subheader("📒 Complete Trade Log")
+
+            st.dataframe(
+         
