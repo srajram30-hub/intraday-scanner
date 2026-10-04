@@ -2,85 +2,95 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 
-st.set_page_config(page_title="Intraday Trading Command Center", layout="wide")
+st.set_page_config(page_title="Intraday Trading Automated Scanner", layout="wide")
 
-st.title("🚀 Intraday Trading Decision Matrix & Automated Scanner")
-st.markdown("This web app runs Python in the cloud to evaluate your 4 technical pillars and provide live trade decisions.")
+st.title("🚀 Automated Intraday Trading Decision Engine")
+st.markdown("This app fetches live market data and **automatically evaluates** your 4 technical pillars using Python math—no manual inputs required!")
 
-# Sidebar for manual override or live stock testing
-st.sidebar.header("🔍 Stock Parameter Inputs")
-stock_symbol = st.sidebar.selectbox("Select Watchlist Stock", ["RELIANCE.NS", "TCS.NS", "SBIN.NS", "BHARTIARTL.NS", "HCLTECH.NS"])
+# Sidebar watchlist selection
+st.sidebar.header("🔍 Watchlist")
+stock_symbol = st.sidebar.selectbox("Select Stock", ["RELIANCE.NS", "TCS.NS", "SBIN.NS", "BHARTIARTL.NS", "HCLTECH.NS"])
 
-# Fetch live price using yfinance
+@st.cache_data(ttl=300)
+def fetch_market_data(ticker):
+    # Fetching intraday data (5-day, 15-minute interval)
+    df = yf.download(ticker, period="5d", interval="15m", progress=False)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    return df
+
 try:
-    ticker_data = yf.Ticker(stock_symbol)
-    todays_data = ticker_data.history(period="1d")
-    current_price = todays_data['Close'].iloc[-1]
-    prev_close = ticker_data.info.get('previousClose', current_price)
-    change_pct = ((current_price - prev_close) / prev_close) * 100
-except:
-    current_price = 0.0
-    change_pct = 0.0
+    data = fetch_market_data(stock_symbol)
+    if data.empty:
+        st.error("Could not fetch data for this symbol. Please try another.")
+    else:
+        # Calculate Technical Indicators
+        data['EMA_20'] = data['Close'].ewm(span=20, adjust=False).mean()
+        data['Vol_MA20'] = data['Volume'].rolling(window=20).mean()
+        
+        latest = data.iloc[-1]
+        current_price = latest['Close']
+        prev_close = data['Close'].iloc[-2]
+        change_pct = ((current_price - prev_close) / prev_close) * 100
 
-st.sidebar.markdown(f"**Live Price:** ₹{current_price:,.2f}")
-st.sidebar.markdown(f"**Change %:** {change_pct:+.2f}%")
+        st.sidebar.markdown(f"**Live Price:** ₹{current_price:,.2f}")
+        st.sidebar.markdown(f"**Change %:** {change_pct:+.2f}%")
 
-st.divider()
+        # --- AUTOMATED 4-PILLAR EVALUATION LOGIC ---
+        
+        # 1. Candlestick Anatomy: Strong Bullish Body (Close > Open and body > 50% of candle range)
+        candle_body = abs(latest['Close'] - latest['Open'])
+        candle_range = latest['High'] - latest['Low']
+        is_strong_candle = (latest['Close'] > latest['Open']) and (candle_range > 0 and (candle_body / candle_range) > 0.5)
+        
+        # 2. Support / Resistance Breakout: Breaking above recent 20-period high
+        recent_high = data['High'].iloc[-21:-1].max()
+        is_breakout = latest['Close'] > recent_high
+        
+        # 3. Market Trend: Price above 20 EMA and EMA sloping up
+        is_uptrend = (latest['Close'] > latest['EMA_20']) and (data['EMA_20'].iloc[-1] > data['EMA_20'].iloc[-5])
+        
+        # 4. Volume Confirmation: Current volume higher than 20-period volume average
+        is_high_volume = latest['Volume'] > latest['Vol_MA20']
 
-# Interactive Form for the 4 Pillars
-st.subheader(f"Analyzing: {stock_symbol}")
+        # Display Automated Pillar Results
+        st.subheader(f"📊 Automated Technical Breakdown: {stock_symbol}")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown(f"**1. Candlestick Anatomy:** {'🟢 Strong Momentum' if is_strong_candle else '🔴 Weak / Indecisive'}")
+            st.markdown(f"**2. Support / Resistance:** {'🟢 Clean Breakout' if is_breakout else '🔴 Stuck / No Breakout'}")
+        
+        with col2:
+            st.markdown(f"**3. Market Trend:** {'🟢 Strong Uptrend' if is_uptrend else '🔴 Choppy / Downtrend'}")
+            st.markdown(f"**4. Volume Confirmation:** {'🟢 High & Confirmed' if is_high_volume else '🔴 Low Volume'}")
 
-col1, col2 = st.columns(2)
+        st.divider()
 
-with col1:
-    candlestick = st.selectbox("1. Candlestick Anatomy", [
-        "Strong Breakout / Momentum", 
-        "Small Body / Doji / Confused", 
-        "Long Upper Wick / Rejection"
-    ])
-    
-    support_resistance = st.selectbox("2. Support / Resistance", [
-        "Clean Breakout / Bounce", 
-        "Stuck at Zone / Mid-way", 
-        "Failed Breakout / Resistance Hold"
-    ])
+        # Final Decision Engine
+        if is_strong_candle and is_breakout and is_uptrend and is_high_volume:
+            decision = "🟢 YES, GO AHEAD"
+            action = "Enter on close / retest; Set SL below breakout candle; Target 1:2+ R:R; Trail with 20 EMA"
+            box_type = "success"
+        elif not is_high_volume or not is_uptrend:
+            decision = "🟡 TEMPORARY HOLD / WAIT"
+            action = "Stand aside; wait for range expansion or volume surge; Set price alerts"
+            box_type = "warning"
+        else:
+            decision = "🔴 DO NOT TRADE"
+            action = "No entry; Protect capital; Avoid trading against trend/rejection"
+            box_type = "error"
 
-with col2:
-    trend = st.selectbox("3. Market Trend", [
-        "Strong Trend (Aligned)", 
-        "Sideways / Choppy", 
-        "Downtrend or Divergence"
-    ])
-    
-    volume = st.selectbox("4. Volume Confirmation", [
-        "High Volume (Confirmed)", 
-        "Low Volume (Fakeout Risk)", 
-        "High Selling Volume"
-    ])
+        st.subheader("🎯 Final Automated Trading Decision")
+        if box_type == "success":
+            st.success(f"**Decision:** {decision}")
+        elif box_type == "warning":
+            st.warning(f"**Decision:** {decision}")
+        else:
+            st.error(f"**Decision:** {decision}")
 
-st.divider()
+        st.info(f"**Risk Action Plan:** {action}")
 
-# Automated Logic Evaluation (The Decision Engine)
-if candlestick == "Strong Breakout / Momentum" and support_resistance == "Clean Breakout / Bounce" and trend == "Strong Trend (Aligned)" and volume == "High Volume (Confirmed)":
-    decision = "🟢 YES, GO AHEAD"
-    action = "Enter on close / retest; Set SL below breakout candle; Target 1:2+ R:R; Trail with 20 EMA"
-    box_color = "success"
-elif volume == "Low Volume (Fakeout Risk)" or trend == "Sideways / Choppy":
-    decision = "🟡 TEMPORARY HOLD / WAIT"
-    action = "Stand aside; wait for range expansion or volume surge; Set price alerts"
-    box_color = "warning"
-else:
-    decision = "🔴 DO NOT TRADE"
-    action = "No entry; Protect capital; Avoid trading against trend/rejection"
-    box_color = "error"
-
-# Display Final Output
-st.subheader("📊 Automated Evaluation Result")
-if box_color == "success":
-    st.success(f"**Final Trading Decision:** {decision}")
-elif box_color == "warning":
-    st.warning(f"**Final Trading Decision:** {decision}")
-else:
-    st.error(f"**Final Trading Decision:** {decision}")
-
-st.info(f"**Risk Action Plan:** {action}")
+except Exception as e:
+    st.error(f"Error loading market data: {e}")
