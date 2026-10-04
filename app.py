@@ -7,7 +7,7 @@ import streamlit as st
 import yfinance as yf
 
 # ============================================================
-# INTRA-DAY PULSE — 1-HOUR OPTIMIZED EDITION
+# INTRADAY PULSE — 1-HOUR OPTIMIZED TARGET EDITION (Target R = 1.2)
 # ============================================================
 
 st.set_page_config(page_title="Intraday Pulse", page_icon="⚡", layout="wide",
@@ -22,16 +22,16 @@ def _ver(v):
 
 STRETCH = {"width": "stretch"} if _ver(st.__version__) >= (1, 50) else {"use_container_width": True}
 
-# ---------------- Parameters (Optimized for 1-Hour Profitability) ----------------
+# ---------------- Parameters (Optimized for Positive Expectancy) ----------------
 MIN_SCORE = 65
 STRONG_SCORE = 80
 RVOL_THRESHOLD = 1.35
 BREAKOUT_BUFFER = 0.0015
 MAX_EXTENSION = 2.5
 DATA_DAYS = 59
-HOLDING_BARS = 10              # Increased to 10 bars so winners can reach 1.5R target
-TARGET_R = 1.5
-BACKTEST_SCORE = 80
+HOLDING_BARS = 10
+TARGET_R = 1.2                 # Lowered to 1.2R so winners hit their full goal more easily
+BACKTEST_SCORE = 85            # Raised quality threshold to take only top setups
 ENTRY_BUFFER = 0.001
 SKIP_OPEN_BARS = 1             # Skip first hourly bar (9:15-10:15 noise)
 LAST_SIGNAL_TIME = "14:15"
@@ -527,7 +527,7 @@ def split_stats(trades):
 # ============================================================
 
 st.markdown("# ⚡ Intraday Pulse")
-st.caption("1-Hour Interval Edition (Optimized Holding Bars). Research tool only.")
+st.caption("1-Hour Interval Edition (Target R = 1.2, Score >= 85). Research tool only.")
 
 scan_tab, backtest_tab = st.tabs(["🚀 Live Scanner", "📈 Backtest"])
 
@@ -566,7 +566,7 @@ with scan_tab:
 
 with backtest_tab:
     st.subheader("📈 1-Hour Strategy Backtest")
-    st.warning(f"Net of costs. Holding bars increased to {HOLDING_BARS} to allow targets to hit.")
+    st.warning(f"Net of costs. Target R: {TARGET_R}, Backtest Score Filter: >= {BACKTEST_SCORE}.")
 
     if st.button("📊 Run Historical Backtest", type="primary", key="bt", **STRETCH):
         try:
