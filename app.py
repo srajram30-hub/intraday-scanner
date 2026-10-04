@@ -7,7 +7,10 @@ import streamlit as st
 import yfinance as yf
 
 # ============================================================
-# INTRADAY PULSE — 1-HOUR ORIGINAL ENGINE
+# INTRADAY PULSE - v4
+# Changes vs v3: daily-R significance stats (trades cluster on the same days),
+# fixed-fractional risk sizing + daily loss limit, non-lookahead liquidity filter,
+# honest equity-curve labelling, Streamlit width-parameter compatibility.
 # ============================================================
 
 st.set_page_config(page_title="Intraday Pulse", page_icon="⚡", layout="wide",
@@ -20,6 +23,7 @@ def _ver(v):
     return tuple(int(x) for x in v.split(".")[:2] if x.isdigit())
 
 
+# Newer Streamlit wants width="stretch"; older versions only know use_container_width.
 STRETCH = {"width": "stretch"} if _ver(st.__version__) >= (1, 50) else {"use_container_width": True}
 
 # ---------------- Parameters ----------------
@@ -27,22 +31,22 @@ MIN_SCORE = 65
 STRONG_SCORE = 80
 RVOL_THRESHOLD = 1.35
 BREAKOUT_BUFFER = 0.0015
-MAX_EXTENSION = 2.5
+MAX_EXTENSION = 2.5            # test 2.5 / 4 / very large to see what this filter costs you
 DATA_DAYS = 59
-HOLDING_BARS = 6               # ~1 trading day on 1-hour charts (6 bars)
+HOLDING_BARS = 8
 TARGET_R = 1.5
 BACKTEST_SCORE = 80
 ENTRY_BUFFER = 0.001
-SKIP_OPEN_BARS = 1             # Skip first 1-hour bar of session (9:15-10:15)
-LAST_SIGNAL_TIME = "14:15"
-COOLDOWN_BARS = 2
-MIN_DAILY_TURNOVER = 5e7
+SKIP_OPEN_BARS = 2
+LAST_SIGNAL_TIME = "14:45"
+COOLDOWN_BARS = 3
+MIN_DAILY_TURNOVER = 5e7       # Rs 5 crore, measured on PRIOR days only (rolling 20-day median)
 SLIPPAGE_PCT = 0.05
 COST_ROUND_TRIP_PCT = 0.10
 OOS_FRACTION = 0.30
 MAX_CONCURRENT_POSITIONS = 4
-RISK_PER_TRADE_PCT = 0.5
-DAILY_LOSS_LIMIT_R = 3.0
+RISK_PER_TRADE_PCT = 0.5       # % of capital risked per trade (1R)
+DAILY_LOSS_LIMIT_R = 3.0       # stop taking new entries for the day after -3R realized
 
 MASTER_WATCHLIST = [
     "HFCL.NS", "RBLBANK.NS", "CUB.NS", "SAILIFE.NS", "AEGISLOG.NS",
@@ -80,7 +84,7 @@ MASTER_WATCHLIST = [
 ]
 
 # ============================================================
-# DATA (1-Hour Interval)
+# DATA
 # ============================================================
 
 def clean_frame(df):
@@ -89,8 +93,8 @@ def clean_frame(df):
     df = df[~df.index.duplicated(keep="last")].sort_index()
     df.index = df.index.tz_localize(IST) if df.index.tz is None else df.index.tz_convert(IST)
     df = df.dropna(subset=["Close"])
-    if len(df) and df.index[-1] + pd.Timedelta(hours=1) > pd.Timestamp.now(tz=IST):
-        df = df.iloc[:-1]
+    if len(df) and df.index[-1] + pd.Timedelta(minutes=15) > pd.Timestamp.now(tz=IST):
+        df = df.iloc[:-1]  # drop the still-forming bar
     return df
 
 
@@ -119,7 +123,7 @@ def download_market_data(tickers, days):
                     else:
                         df = data.copy()
                     df = clean_frame(df)
-                    if len(df) >= 30:
+                    if len(df) >= 60:
                         all_data[t] = df
                     else:
                         errors.append(t)
@@ -134,7 +138,7 @@ def download_market_data(tickers, days):
 @st.cache_data(ttl=60, show_spinner=False)
 def download_nifty(days):
     for _ in range(2):
-        df = yf.download("^NSEI", period=f"{days}d", interval="60m",
+        df = yf.download("^NSEI", period=f"{days}d", interval="15m",
                          auto_adjust=True, progress=False)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
@@ -150,7 +154,7 @@ def download_nifty(days):
 
 def calculate_indicators(raw):
     df = raw[["Open", "High", "Low", "Close", "Volume"]].apply(pd.to_numeric, errors="coerce").dropna()
-    if len(df) < 30:
+    if len(df) < 60:
         return pd.DataFrame()
 
     df["Date"] = df.index.date
@@ -239,8 +243,9 @@ def build_frame(raw, nifty_ind):
     if df.empty:
         return df
 
+    # Liquidity from PRIOR days only (rolling 20-day median), so there is no lookahead.
     daily_turnover = (df["Close"] * df["Volume"]).groupby(df["Date"]).sum()
-    liquid_days = daily_turnover.shift(1).rolling(10, min_periods=3).median() >= MIN_DAILY_TURNOVER
+    liquid_days = daily_turnover.shift(1).rolling(20, min_periods=5).median() >= MIN_DAILY_TURNOVER
     df["Liquid"] = df["Date"].isin(set(liquid_days[liquid_days].index))
     if not df["Liquid"].any():
         return pd.DataFrame()
@@ -335,15 +340,16 @@ def run_live_scan(stock_data, nifty_raw):
     return out, market_info, sorted(skipped)
 
 # ============================================================
-# PORTFOLIO BACKTEST
+# PORTFOLIO BACKTEST (time-ordered, position cap, daily loss limit)
 # ============================================================
 
 def collect_signals(ticker, df):
+    """All fillable signals for one stock (portfolio rules are applied later)."""
     o, h = df["Open"].values, df["High"].values
     c, atr, dates = df["Close"].values, df["ATR"].values, df["Date"].values
     sig = (df["Signal"] & (df["Score"] >= BACKTEST_SCORE)).values
     n, out = len(df), []
-    for i in range(20, n - 1):
+    for i in range(30, n - 1):
         if not sig[i]:
             continue
         j = i + 1
@@ -411,12 +417,12 @@ def run_full_backtest(tickers, days):
         except Exception:
             errors.append(ticker)
 
-    signals.sort(key=lambda s: (s["entry_time"], -s["score"]))
+    signals.sort(key=lambda s: (s["entry_time"], -s["score"]))   # chronological, best score first
 
     active, trades, cooldown, day_book = [], [], {}, {}
     for sig in signals:
         et, tk = sig["entry_time"], sig["ticker"]
-        active = [x for x in active if x > et]
+        active = [x for x in active if x > et]                   # positions still open at entry
         if cooldown.get(tk, et) > et:
             continue
         if len(active) >= MAX_CONCURRENT_POSITIONS:
@@ -424,7 +430,7 @@ def run_full_backtest(tickers, days):
         day = et.date()
         realized = sum(r for x_exit, r in day_book.get(day, []) if x_exit <= et)
         if realized <= -DAILY_LOSS_LIMIT_R:
-            continue
+            continue                                             # daily loss limit hit
 
         df, j = sig["df"], sig["entry_idx"]
         exit_price, reason, exit_k, pnl, r = simulate_trade(sig)
@@ -467,6 +473,7 @@ def wilson_ci(wins, n, z=1.96):
 
 
 def daily_r(trades):
+    """Total R per trading day. Trades are flat by the close, so entry date = exit date."""
     return trades.groupby(trades["Entry Time"].dt.date)["R (net)"].sum()
 
 
@@ -527,14 +534,14 @@ def split_stats(trades):
 # ============================================================
 
 st.markdown("# ⚡ Intraday Pulse")
-st.caption("1-Hour Interval Edition. Research tool only, not investment advice.")
+st.caption("Research tool only, not investment advice.")
 
 scan_tab, backtest_tab = st.tabs(["🚀 Live Scanner", "📈 Backtest"])
 
 with scan_tab:
     if st.button("🚀 Run Instant Market Scan", type="primary", key="scan", **STRETCH):
         try:
-            with st.spinner(f"Scanning {len(MASTER_WATCHLIST)} 1-hour charts..."):
+            with st.spinner(f"Scanning {len(MASTER_WATCHLIST)} stocks..."):
                 stock_data, dl_errors = download_market_data(tuple(MASTER_WATCHLIST), DATA_DAYS)
                 nifty = download_nifty(DATA_DAYS)
                 results, market_info, skipped = run_live_scan(stock_data, nifty)
@@ -545,7 +552,7 @@ with scan_tab:
             st.error(f"Scan failed: {e}")
 
     if "live_results" not in st.session_state:
-        st.info("Tap **Run Instant Market Scan** to analyse the 1-hour watchlist.")
+        st.info("Tap **Run Instant Market Scan** to analyse the watchlist.")
     else:
         results, mi = st.session_state["live_results"], st.session_state["market_info"]
         now = pd.Timestamp.now(tz=IST)
@@ -553,10 +560,10 @@ with scan_tab:
         in_hours = now.weekday() < 5 and "09:15" <= now.strftime("%H:%M") <= "15:30"
         if asof.date() != now.date():
             st.warning(f"Latest completed bar is {asof:%d %b %H:%M}. Market is closed or data is stale.")
-        elif in_hours and now - asof > pd.Timedelta(hours=2):
+        elif in_hours and now - asof > pd.Timedelta(minutes=20):
             st.warning(f"Data looks delayed: latest completed bar is {asof:%H:%M} IST.")
         else:
-            st.caption(f"Data as of last completed 1-hour bar: {asof:%d %b %H:%M} IST")
+            st.caption(f"Data as of last completed 15m bar: {asof:%d %b %H:%M} IST")
 
         st.markdown(f"### Market Regime: {mi['regime']}")
         c1, c2, c3, c4 = st.columns(4)
@@ -565,33 +572,36 @@ with scan_tab:
         c3.metric("Strong Setups", int((results["Status"] == "🟢 ENTER ON TRIGGER").sum()) if len(results) else 0)
         c4.metric("Breakouts", int((results["Breakout"] == "YES").sum()) if len(results) else 0)
 
+        st.caption("Entry is a buy-stop for the NEXT bar: take the trade only if price trades through the trigger. "
+                   f"Size so that (entry - stop) x quantity = {RISK_PER_TRADE_PCT}% of capital.")
         if results.empty:
             st.warning("No stocks passed the data, liquidity and signal filters.")
         else:
             st.dataframe(results, hide_index=True, **STRETCH)
             st.download_button("⬇️ Download Results CSV", results.to_csv(index=False).encode("utf-8"),
-                               "1h_scan_results.csv", "text/csv", **STRETCH)
+                               "intraday_scan_results.csv", "text/csv", **STRETCH)
         with st.expander("Skipped / failed tickers"):
             st.write("Download failures:", st.session_state["live_errors"] or "none")
             st.write("Illiquid, stale or incomplete:", st.session_state["live_skipped"] or "none")
 
 with backtest_tab:
-    st.subheader("📈 1-Hour Strategy Backtest")
+    st.subheader("📈 Portfolio Strategy Backtest")
     st.warning(
         f"Net of costs ({COST_ROUND_TRIP_PCT}% round trip + {SLIPPAGE_PCT}% slippage per side). "
         f"Max {MAX_CONCURRENT_POSITIONS} concurrent positions, {RISK_PER_TRADE_PCT}% of capital risked per trade, "
-        "1-hour interval candles.")
+        f"no new entries after a -{DAILY_LOSS_LIMIT_R:g}R day. Buy-stop entries, stops win ties, "
+        "gap-through-stop exits at the open, all flat by the close. About 59 days of data: one market regime.")
 
     if st.button("📊 Run Historical Backtest", type="primary", key="bt", **STRETCH):
         try:
-            with st.spinner("Running 1-hour portfolio simulation..."):
+            with st.spinner("Running time-ordered portfolio simulation..."):
                 trades, errors, skipped = run_full_backtest(tuple(MASTER_WATCHLIST), DATA_DAYS)
             st.session_state.update(backtest_trades=trades, bt_errors=errors, bt_skipped=skipped)
         except Exception as e:
             st.error(f"Backtest failed: {e}")
 
     if "backtest_trades" not in st.session_state:
-        st.info("Tap **Run Historical Backtest** to measure 1-hour performance.")
+        st.info("Tap **Run Historical Backtest** to measure performance.")
     else:
         trades = st.session_state["backtest_trades"]
         if trades.empty:
@@ -599,7 +609,8 @@ with backtest_tab:
         else:
             s = calculate_backtest_stats(trades)
             m = st.columns(4)
-            m[0].metric("Win Rate", f"{s['Win Rate %']:.1f}%")
+            m[0].metric("Win Rate", f"{s['Win Rate %']:.1f}%",
+                        help=f"95% CI {s['Win Rate 95% CI (optimistic)']}; assumes independent trades, so too narrow.")
             m[1].metric("Trades", s["Trades"])
             m[2].metric("Expectancy (net)", f"{s['Expectancy R']:+.3f}R")
             m[3].metric("Profit Factor", f"{s['Profit Factor']:.2f}" if np.isfinite(s["Profit Factor"]) else "∞")
@@ -607,13 +618,41 @@ with backtest_tab:
             m[0].metric("Total R", f"{s['Total R']:+.2f}R")
             m[1].metric("Avg Win / Loss", f"{s['Avg Win R']:+.2f} / {s['Avg Loss R']:+.2f}R")
             m[2].metric("Max Drawdown", f"{s['Max Drawdown R']:.2f}R")
-            m[3].metric("Daily t-stat", f"{s['Daily t-stat']:.2f}")
+            m[3].metric("Daily t-stat", f"{s['Daily t-stat']:.2f}",
+                        help="Mean daily R over its standard error. Trades on the same day are correlated, "
+                             "so this is the fairer test. Below ~2 is not distinguishable from luck.")
+            m = st.columns(4)
+            m[0].metric("Return (non-compounded)", f"{s['Return % (non-compounded)']:+.1f}%")
+            m[1].metric("Max Drawdown %", f"{s['Max Drawdown %']:.1f}%")
+            m[2].metric("Winning Days", f"{s['Winning Days %']:.0f}% of {s['Trading Days']}")
+            m[3].metric("Worst Day", f"{s['Worst Day R']:+.2f}R")
+
+            st.subheader("In-sample vs out-of-sample")
+            st.dataframe(split_stats(trades), **STRETCH)
 
             st.subheader("Cumulative return % (non-compounded)")
             eq = trades.sort_values("Exit Time")["R (net)"].cumsum() * RISK_PER_TRADE_PCT
             st.line_chart(pd.DataFrame({"Cumulative return %": eq.values}))
+            st.caption(f"Fixed {RISK_PER_TRADE_PCT}% risk per trade with the position cap and daily loss limit applied. "
+                       "Notional exposure, margin and tax are not modelled, so this is an approximation of a "
+                       "portfolio, not a statement of what an account would have earned.")
+
+            st.subheader("Daily results")
+            daily_df = (trades.groupby(trades["Entry Time"].dt.date)["R (net)"]
+                        .agg(Trades="size", **{"Total R": "sum"}).reset_index()
+                        .rename(columns={"Entry Time": "Date"}))
+            daily_df["Total R"] = daily_df["Total R"].round(2)
+            daily_df["Portfolio %"] = (daily_df["Total R"] * RISK_PER_TRADE_PCT).round(2)
+            st.bar_chart(daily_df.set_index("Date")["Total R"])
+            st.dataframe(daily_df, hide_index=True, **STRETCH)
+
+            st.subheader("Exit reasons")
+            st.dataframe(trades["Exit Reason"].value_counts().rename("Trades").to_frame(), **STRETCH)
 
             st.subheader("📒 Trade Log")
             st.dataframe(trades, hide_index=True, **STRETCH)
             st.download_button("⬇️ Download Trade Log CSV", trades.to_csv(index=False).encode("utf-8"),
-                               "1h_backtest_trade_log.csv", "text/csv", **STRETCH)
+                               "backtest_trade_log.csv", "text/csv", **STRETCH)
+            with st.expander("Skipped / failed tickers"):
+                st.write("Download/processing failures:", st.session_state["bt_errors"] or "none")
+                st.write("Below liquidity filter:", st.session_state["bt_skipped"] or "none")
