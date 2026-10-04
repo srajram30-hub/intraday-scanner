@@ -7,7 +7,7 @@ import streamlit as st
 import yfinance as yf
 
 # ============================================================
-# INTRADAY PULSE — 1-HOUR OPTIMIZED TARGET EDITION (Target R = 1.2)
+# INTRADAY PULSE — 30-MINUTE DAILY GATEKEEPER EDITION
 # ============================================================
 
 st.set_page_config(page_title="Intraday Pulse", page_icon="⚡", layout="wide",
@@ -22,21 +22,21 @@ def _ver(v):
 
 STRETCH = {"width": "stretch"} if _ver(st.__version__) >= (1, 50) else {"use_container_width": True}
 
-# ---------------- Parameters (Optimized for Positive Expectancy) ----------------
+# ---------------- Parameters (30-Min Interval) ----------------
 MIN_SCORE = 65
 STRONG_SCORE = 80
 RVOL_THRESHOLD = 1.35
 BREAKOUT_BUFFER = 0.0015
 MAX_EXTENSION = 2.5
 DATA_DAYS = 59
-HOLDING_BARS = 10
-TARGET_R = 1.2                 # Lowered to 1.2R so winners hit their full goal more easily
-BACKTEST_SCORE = 85            # Raised quality threshold to take only top setups
+HOLDING_BARS = 12              # ~1 trading day on 30m charts (12 bars)
+TARGET_R = 1.5
+BACKTEST_SCORE = 80
 ENTRY_BUFFER = 0.001
-SKIP_OPEN_BARS = 1             # Skip first hourly bar (9:15-10:15 noise)
-LAST_SIGNAL_TIME = "14:15"
-COOLDOWN_BARS = 2
-MIN_DAILY_TURNOVER = 5e7       # Rs 5 crore prior-day liquidity filter
+SKIP_OPEN_BARS = 2             # Skip first two 30m bars of the session (9:15 - 10:15 noise)
+LAST_SIGNAL_TIME = "14:30"
+COOLDOWN_BARS = 4
+MIN_DAILY_TURNOVER = 5e7
 SLIPPAGE_PCT = 0.05
 COST_ROUND_TRIP_PCT = 0.10
 OOS_FRACTION = 0.30
@@ -80,7 +80,7 @@ MASTER_WATCHLIST = [
 ]
 
 # ============================================================
-# DATA (1-Hour Interval)
+# DATA (30-Minute Interval)
 # ============================================================
 
 def clean_frame(df):
@@ -89,7 +89,7 @@ def clean_frame(df):
     df = df[~df.index.duplicated(keep="last")].sort_index()
     df.index = df.index.tz_localize(IST) if df.index.tz is None else df.index.tz_convert(IST)
     df = df.dropna(subset=["Close"])
-    if len(df) and df.index[-1] + pd.Timedelta(hours=1) > pd.Timestamp.now(tz=IST):
+    if len(df) and df.index[-1] + pd.Timedelta(minutes=30) > pd.Timestamp.now(tz=IST):
         df = df.iloc[:-1]
     return df
 
@@ -101,7 +101,7 @@ def download_market_data(tickers, days):
     for start in range(0, len(tickers), chunk_size):
         chunk = list(tickers[start:start + chunk_size])
         try:
-            data = yf.download(chunk, period=f"{days}d", interval="60m", auto_adjust=True,
+            data = yf.download(chunk, period=f"{days}d", interval="30m", auto_adjust=True,
                                progress=False, group_by="ticker", threads=True)
             if data.empty:
                 errors.extend(chunk)
@@ -119,7 +119,7 @@ def download_market_data(tickers, days):
                     else:
                         df = data.copy()
                     df = clean_frame(df)
-                    if len(df) >= 30:
+                    if len(df) >= 50:
                         all_data[t] = df
                     else:
                         errors.append(t)
@@ -134,7 +134,7 @@ def download_market_data(tickers, days):
 @st.cache_data(ttl=60, show_spinner=False)
 def download_nifty(days):
     for _ in range(2):
-        df = yf.download("^NSEI", period=f"{days}d", interval="60m",
+        df = yf.download("^NSEI", period=f"{days}d", interval="30m",
                          auto_adjust=True, progress=False)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
@@ -145,12 +145,12 @@ def download_nifty(days):
     raise RuntimeError("Could not download NIFTY (^NSEI) data.")
 
 # ============================================================
-# INDICATORS & SCORING
+# INDICATORS & DAILY GATEKEEPER FILTER
 # ============================================================
 
 def calculate_indicators(raw):
     df = raw[["Open", "High", "Low", "Close", "Volume"]].apply(pd.to_numeric, errors="coerce").dropna()
-    if len(df) < 30:
+    if len(df) < 50:
         return pd.DataFrame()
 
     df["Date"] = df.index.date
@@ -200,6 +200,17 @@ def calculate_indicators(raw):
 
     ref5 = g["Close"].shift(5).fillna(df["DayOpen"])
     df["Return5"] = (df["Close"] / ref5 - 1) * 100
+
+    # --- DAILY GATEKEEPER FILTER (Yesterday's Check) ---
+    daily_df = g.agg({"Open": "first", "High": "max", "Low": "min", "Close": "last"}).dropna()
+    daily_df["YesterdayGreen"] = daily_df["Close"] > daily_df["Open"]
+    daily_df["YesterdayHigherHigh"] = daily_df["High"] > daily_df["High"].shift(1)
+    # The condition must be met by YESTERDAY's daily candle for TODAY to be allowed
+    daily_df["AllowedToday"] = daily_df["YesterdayGreen"] | daily_df["YesterdayHigherHigh"]
+    # Shift by 1 so today's date inherits yesterday's evaluation
+    daily_df["AllowedToday"] = daily_df["AllowedToday"].shift(1).fillna(False)
+
+    df["DailyAllowed"] = df["Date"].map(daily_df["AllowedToday"].to_dict()).fillna(False)
     return df
 
 
@@ -229,9 +240,10 @@ def components(df):
         ("Strong closing range", c["StrongCandle"], 3, "Weak candle"),
         ("Positive RS vs NIFTY", c["RS"] >= 0.5, 10, "Weak RS vs NIFTY"),
         ("Supportive market", c["MScore"] >= 5, 5, "Weak market"),
+        ("Daily Gatekeeper Passed", c["DailyAllowed"], 10, "Daily filter failed"),
     ]
 
-MAX_RAW = 90
+MAX_RAW = 100
 
 
 def build_frame(raw, nifty_ind):
@@ -252,8 +264,8 @@ def build_frame(raw, nifty_ind):
     raw_pts = sum(pts * m.astype(int) for _, m, pts, _ in components(df))
     df["Score"] = (raw_pts / MAX_RAW * 100).round().astype(int)
 
-    need = ["EMA20", "VWAP", "RSI", "ATR", "RVOL", "Previous20High", "Return5", "RS", "MScore"]
-    df["Valid"] = df[need].notna().all(axis=1) & (df["BarNo"] >= SKIP_OPEN_BARS) & df["Liquid"]
+    need = ["EMA20", "VWAP", "RSI", "ATR", "RVOL", "Previous20High", "Return5", "RS", "MScore", "DailyAllowed"]
+    df["Valid"] = df[need].notna().all(axis=1) & (df["BarNo"] >= SKIP_OPEN_BARS) & df["Liquid"] & df["DailyAllowed"]
     df["InWindow"] = df["BarTime"] <= LAST_SIGNAL_TIME
     df["Extended"] = df["Return5"] > MAX_EXTENSION
     df["Signal"] = df["Valid"] & df["Breakout"] & ~df["Extended"] & df["InWindow"]
@@ -297,10 +309,6 @@ def run_live_scan(stock_data, nifty_raw):
         comps = components(df)
         reasons = [lab for lab, m, _, _ in comps if bool(m.iloc[-1])]
         risks = [rl for _, m, _, rl in comps if not bool(m.iloc[-1])]
-        if last["Extended"]:
-            risks.append(f"Extended (>{MAX_EXTENSION}% in 5 bars)")
-        if not last["InWindow"]:
-            risks.append(f"After {LAST_SIGNAL_TIME}: no new entries")
 
         score = int(last["Score"])
         if last["Signal"] and score >= STRONG_SCORE:
@@ -323,9 +331,7 @@ def run_live_scan(stock_data, nifty_raw):
             "Target": round(target, 2), "Risk/Share": round(risk, 2), "R:R": TARGET_R,
             "RSI": round(float(last["RSI"]), 1), "RVOL": round(float(last["RVOL"]), 2),
             "RS vs NIFTY": round(float(last["RS"]), 2),
-            "VWAP Dist %": round((close / float(last["VWAP"]) - 1) * 100, 2),
             "Breakout": "YES" if last["Breakout"] else "NO",
-            "Breakout Age": int(last["BreakoutAge"]),
             "Why Score?": ", ".join(reasons), "Risks": ", ".join(risks) or "None",
         })
 
@@ -443,7 +449,7 @@ def run_full_backtest(tickers, days):
             "Outcome": "WIN" if r > 0 else "LOSS" if r < 0 else "BREAKEVEN",
             "Exit Reason": reason, "Bars Held": exit_k - j + 1,
             "RSI": round(float(row["RSI"]), 1), "RVOL": round(float(row["RVOL"]), 2),
-            "RS vs NIFTY": round(float(row["RS"]), 2), "5-Bar Move %": round(float(row["Return5"]), 2),
+            "RS vs NIFTY": round(float(row["RS"]), 2),
             "Market": regime_label(int(row["MScore"])),
         })
 
@@ -487,12 +493,12 @@ def calculate_backtest_stats(trades):
     dse = d.std(ddof=1) / np.sqrt(nd) if nd > 1 else np.nan
     return {
         "Trades": n, "Wins": wins, "Losses": losses,
-        "Win Rate %": wins / n * 100, "Win Rate 95% CI (optimistic)": f"{lo:.0f}-{hi:.0f}%",
+        "Win Rate %": wins / n * 100, "Win Rate 95% CI": f"{lo:.0f}-{hi:.0f}%",
         "Avg Win R": r[r > 0].mean() if wins else 0.0,
         "Avg Loss R": r[r < 0].mean() if losses else 0.0,
         "Profit Factor": gp / gl if gl > 0 else np.inf,
         "Expectancy R": r.mean(),
-        "Per-trade t-stat (optimistic)": r.mean() / se if se and se > 0 else np.nan,
+        "Per-trade t-stat": r.mean() / se if se and se > 0 else np.nan,
         "Trading Days": nd,
         "Daily t-stat": d.mean() / dse if dse and dse > 0 else np.nan,
         "Winning Days %": (d > 0).mean() * 100,
@@ -527,14 +533,14 @@ def split_stats(trades):
 # ============================================================
 
 st.markdown("# ⚡ Intraday Pulse")
-st.caption("1-Hour Interval Edition (Target R = 1.2, Score >= 85). Research tool only.")
+st.caption("30-Minute Interval + Daily Gatekeeper Edition (Yesterday Green or Higher High).")
 
 scan_tab, backtest_tab = st.tabs(["🚀 Live Scanner", "📈 Backtest"])
 
 with scan_tab:
     if st.button("🚀 Run Instant Market Scan", type="primary", key="scan", **STRETCH):
         try:
-            with st.spinner(f"Scanning {len(MASTER_WATCHLIST)} 1-hour charts..."):
+            with st.spinner(f"Scanning {len(MASTER_WATCHLIST)} 30-minute charts with Daily Filter..."):
                 stock_data, dl_errors = download_market_data(tuple(MASTER_WATCHLIST), DATA_DAYS)
                 nifty = download_nifty(DATA_DAYS)
                 results, market_info, skipped = run_live_scan(stock_data, nifty)
@@ -545,7 +551,7 @@ with scan_tab:
             st.error(f"Scan failed: {e}")
 
     if "live_results" not in st.session_state:
-        st.info("Tap **Run Instant Market Scan** to analyse the 1-hour watchlist.")
+        st.info("Tap **Run Instant Market Scan** to analyse the 30-minute watchlist.")
     else:
         results, mi = st.session_state["live_results"], st.session_state["market_info"]
         now = pd.Timestamp.now(tz=IST)
@@ -558,19 +564,19 @@ with scan_tab:
         c4.metric("Breakouts", int((results["Breakout"] == "YES").sum()) if len(results) else 0)
 
         if results.empty:
-            st.warning("No stocks passed the data, liquidity and signal filters.")
+            st.warning("No stocks passed the daily gatekeeper and intraday breakout filters.")
         else:
             st.dataframe(results, hide_index=True, **STRETCH)
             st.download_button("⬇️ Download Results CSV", results.to_csv(index=False).encode("utf-8"),
-                               "1h_scan_results.csv", "text/csv", **STRETCH)
+                               "30m_scan_results.csv", "text/csv", **STRETCH)
 
 with backtest_tab:
-    st.subheader("📈 1-Hour Strategy Backtest")
-    st.warning(f"Net of costs. Target R: {TARGET_R}, Backtest Score Filter: >= {BACKTEST_SCORE}.")
+    st.subheader("📈 30-Minute Strategy Backtest")
+    st.warning("Net of costs. 30-minute interval with the Daily Gatekeeper pre-filter enabled.")
 
     if st.button("📊 Run Historical Backtest", type="primary", key="bt", **STRETCH):
         try:
-            with st.spinner("Running 1-hour portfolio simulation..."):
+            with st.spinner("Running 30-minute portfolio simulation..."):
                 trades, errors, skipped = run_full_backtest(tuple(MASTER_WATCHLIST), DATA_DAYS)
             st.session_state.update(backtest_trades=trades, bt_errors=errors, bt_skipped=skipped)
         except Exception as e:
@@ -602,4 +608,4 @@ with backtest_tab:
             st.subheader("📒 Trade Log")
             st.dataframe(trades, hide_index=True, **STRETCH)
             st.download_button("⬇️ Download Trade Log CSV", trades.to_csv(index=False).encode("utf-8"),
-                               "1h_backtest_trade_log.csv", "text/csv", **STRETCH)
+                               "30m_backtest_trade_log.csv", "text/csv", **STRETCH)
