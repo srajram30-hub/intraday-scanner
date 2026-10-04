@@ -3,27 +3,43 @@ import pandas as pd
 import yfinance as yf
 import numpy as np
 
-st.set_page_config(page_title="Nifty 100 Breakout & Momentum Scanner (v2)", layout="wide")
+st.set_page_config(page_title="Master Intraday Breakout & Momentum Scanner", layout="wide")
 
-st.title("⚡ Nifty 100 Intraday Breakout & Momentum Scanner (v2)")
-st.markdown("Advanced quantitative scoring model using **Weighted Pillars, Session VWAP, RVOL, and Structure-Aware Risk Management**.")
+st.title("⚡ Master Intraday Breakout & Momentum Scanner (v2)")
+st.markdown("Quantitative scoring model running across your comprehensive Indian stock universe with **Session VWAP & Weighted Pillars**.")
 
-nifty_100_watchlist = [
-    "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS", 
-    "SBIN.NS", "BHARTIARTL.NS", "ITC.NS", "KOTAKBANK.NS", "LT.NS", 
-    "AXISBANK.NS", "ASIANPAINT.NS", "MARUTI.NS", "SUNPHARMA.NS", "TITAN.NS",
-    "BAJFINANCE.NS", "HCLTECH.NS", "TATASTEEL.NS", "NTPC.NS", "POWERGRID.NS",
-    "ONGC.NS", "COALINDIA.NS", "NESTLEIND.NS", "GRASIM.NS", "ADANIENT.NS",
-    "ADANIPORTS.NS", "CIPLA.NS", "SBILIFE.NS", "BPCL.NS", "TATAMOTORS.NS",
-    "WIPRO.NS", "HDFCLIFE.NS", "BRITANNIA.NS", "DIVISLAB.NS", "EICHERMOT.NS",
-    "HEROMOTOCO.NS", "HINDALCO.NS", "INDUSINDBK.NS", "JSWSTEEL.NS", "BAJAJFINSV.NS",
-    "TECHM.NS", "M&M.NS", "HINDUNILVR.NS", "TATACONSUM.NS", "DRREDDY.NS",
-    "CROMPTON.NS", "PGEL.NS", "APOLLOHOSP.NS", "TVSMOTOR.NS", "PAYTM.NS", 
-    "INDIGO.NS", "LUPIN.NS", "MAXHEALTH.NS", "TRENT.NS"
+# Your complete master stock watchlist
+master_watchlist = [
+    "HFCL.NS", "RBLBANK.NS", "CUB.NS", "SAILIFE.NS", "AEGISLOG.NS", "ANGELONE.NS", 
+    "CAMS.NS", "TDPOWERSYS.NS", "NEULANDLAB.NS", "LALPATHLAB.NS", "KARURVYSYA.NS", 
+    "TATAELXSI.NS", "ANANDRATHI.NS", "APOLLOTYRE.NS", "NATCOPHARM.NS", "MTARTECH.NS", 
+    "TATACHEM.NS", "ARE&M.NS", "KFINTECH.NS", "IGL.NS", "INOXWIND.NS", "GLAND.NS", 
+    "TATATECH.NS", "BANDHANBNK.NS", "NAVINFLUOR.NS", "ATHERENERG.NS", "NBCC.NS", 
+    "ONESOURCE.NS", "KPITTECH.NS", "CDSL.NS", "SYNGENE.NS", "WOCKPHARMA.NS", 
+    "GESHIP.NS", "REDINGTON.NS", "MANAPPURAM.NS", "POONAWALLA.NS", "KIRLOSENG.NS", 
+    "DELHIVERY.NS", "HSCL.NS", "PNBHOUSING.NS", "PGEL.NS", "AMBER.NS", "CROMPTON.NS", 
+    "KAYNES.NS", "IIFL.NS", "SONACOMS.NS", "AFFLE.NS", "PPLPHARMA.NS", "WELCORP.NS", 
+    "HAVELLS.NS", "FORTIS.NS", "PERSISTENT.NS", "NYKAA.NS", "MFSL.NS", "BHEL.NS", 
+    "MANKIND.NS", "INDUSTOWER.NS", "SRF.NS", "AUROPHARMA.NS", "PRESTIGE.NS", 
+    "FEDERALBNK.NS", "LAURUSLABS.NS", "LUPIN.NS", "GLENMARK.NS", "PHOENIXLTD.NS", 
+    "MARICO.NS", "YESBANK.NS", "OIL.NS", "IDFCFIRSTB.NS", "PAYTM.NS", "HEROMOTOCO.NS", 
+    "UNITDSPR.NS", "INDHOTEL.NS", "NHPC.NS", "TIINDIA.NS", "SUZLON.NS", "HINDPETRO.NS", 
+    "DABUR.NS", "NAUKRI.NS", "INDUSINDBK.NS", "ICICIGI.NS", "NATIONALUM.NS", 
+    "JSWENERGY.NS", "GODREJPROP.NS", "GMRAIRPORT.NS", "AUBANK.NS", "ASHOKLEY.NS", 
+    "NMDC.NS", "BHARATFORG.NS", "MCX.NS", "DIXON.NS", "APLAPOLLO.NS", "RECLTD.NS", 
+    "UPL.NS", "SWIGGY.NS", "POLICYBZR.NS", "INFY.NS", "HDFCLIFE.NS", "HDFCBANK.NS", 
+    "SBILIFE.NS", "MAXHEALTH.NS", "TCS.NS", "HCLTECH.NS", "TATACONSUM.NS", "TECHM.NS", 
+    "KOTAKBANK.NS", "ASIANPAINT.NS", "BAJAJFINSV.NS", "HINDALCO.NS", "CIPLA.NS", 
+    "NESTLEIND.NS", "APOLLOHOSP.NS", "SBIN.NS", "AXISBANK.NS", "ICICIBANK.NS", 
+    "SUNPHARMA.NS", "BHARTIARTL.NS", "COALINDIA.NS", "INDIGO.NS", "BAJFINANCE.NS", 
+    "BEL.NS", "BSE.NS", "ONGC.NS", "TITAN.NS", "TRENT.NS", "JSWSTEEL.NS", "RELIANCE.NS", 
+    "LT.NS", "JIOFIN.NS", "DRREDDY.NS", "ULTRACEMCO.NS", "POWERGRID.NS", "HINDUNILVR.NS", 
+    "NTPC.NS", "ITC.NS", "ADANIENT.NS", "M&M.NS", "EICHERMOT.NS", "GRASIM.NS", 
+    "ADANIPORTS.NS", "TATASTEEL.NS", "SHRIRAMFIN.NS", "MARUTI.NS", "BAJAJ-AUTO.NS"
 ]
 
 @st.cache_data(ttl=60)
-def scan_nifty_market(tickers):
+def scan_master_market(tickers):
     results = []
     for ticker in tickers:
         try:
@@ -33,7 +49,7 @@ def scan_nifty_market(tickers):
             if df.empty or len(df) < 25:
                 continue
                 
-            # 1. Technical Indicators Setup
+            # Technical Indicators
             df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
             df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
             
@@ -44,7 +60,7 @@ def scan_nifty_market(tickers):
             rs = gain / loss
             df['RSI'] = 100 - (100 / (1 + rs))
             
-            # CORRECTION: True Session VWAP (Resets daily)
+            # True Session VWAP (Resets daily)
             df['Date'] = df.index.date
             df['Typical_Price'] = (df['High'] + df['Low'] + df['Close']) / 3
             df['TP_Vol'] = df['Typical_Price'] * df['Volume']
@@ -70,7 +86,7 @@ def scan_nifty_market(tickers):
             reasons = []
             invalidation_triggers = []
             
-            # Pillar 1: Candle Strength (+15 pts)
+            # 1. Candle Strength (+15 pts)
             candle_body = abs(latest['Close'] - latest['Open'])
             candle_range = latest['High'] - latest['Low']
             is_strong_candle = (latest['Close'] > latest['Open']) and (candle_range > 0 and (candle_body / candle_range) > 0.4)
@@ -78,49 +94,49 @@ def scan_nifty_market(tickers):
                 score += 15
                 reasons.append("Strong Candle (+15)")
             else:
-                invalidation_triggers.append("Weak/Doji candle structure")
+                invalidation_triggers.append("Weak/Doji candle")
 
-            # Pillar 2: 20-Bar Breakout (+25 pts)
+            # 2. 20-Bar Breakout (+25 pts)
             recent_high = df['High'].iloc[-21:-1].max()
             is_breakout = current_price >= recent_high
             if is_breakout:
                 score += 25
                 reasons.append("20-Bar Breakout (+25)")
             else:
-                invalidation_triggers.append("Below 20-bar resistance")
+                invalidation_triggers.append("Below resistance")
 
-            # Pillar 3: Trend - Above 20 EMA (+15 pts)
+            # 3. Above 20 EMA (+15 pts)
             is_above_ema = current_price > latest['EMA_20']
             if is_above_ema:
                 score += 15
                 reasons.append("Above 20 EMA (+15)")
             else:
-                invalidation_triggers.append("Price below 20 EMA")
+                invalidation_triggers.append("Below 20 EMA")
 
-            # Pillar 4: Trend - Above Session VWAP (+15 pts)
+            # 4. Above Session VWAP (+15 pts)
             is_above_vwap = current_price > latest['Session_VWAP']
             if is_above_vwap:
                 score += 15
                 reasons.append("Above Session VWAP (+15)")
             else:
-                invalidation_triggers.append("Trading below Session VWAP")
+                invalidation_triggers.append("Below Session VWAP")
 
-            # Pillar 5: Volume - RVOL > 1.3 (+20 pts)
+            # 5. RVOL > 1.3 (+20 pts)
             rvol = latest['Volume'] / latest['Vol_MA20'] if latest['Vol_MA20'] > 0 else 0
             if rvol > 1.3:
                 score += 20
                 reasons.append(f"RVOL {rvol:.1f}x (+20)")
             else:
-                invalidation_triggers.append(f"Low Volume (RVOL {rvol:.1f}x)")
+                invalidation_triggers.append(f"Low RVOL ({rvol:.1f}x)")
 
-            # Pillar 6: Momentum - RSI 50-75 (+10 pts)
+            # 6. RSI Health 50-75 (+10 pts)
             rsi_val = latest['RSI'] if not np.isnan(latest['RSI']) else 50
             if 50 <= rsi_val <= 75:
                 score += 10
                 reasons.append(f"RSI {rsi_val:.1f} (+10)")
             elif rsi_val > 75:
                 score += 5
-                reasons.append(f"RSI Overbought {rsi_val:.1f} (+5)")
+                reasons.append(f"RSI Overbought ({rsi_val:.1f}) (+5)")
             else:
                 invalidation_triggers.append(f"RSI Weak ({rsi_val:.1f})")
 
@@ -134,12 +150,11 @@ def scan_nifty_market(tickers):
             else:
                 verdict = "🔴 AVOID"
 
-            # Structure-Aware Risk Management (Stop-Loss & Target)
+            # Structure-Aware Risk Management
             atr_val = latest['ATR'] if not np.isnan(latest['ATR']) else (current_price * 0.005)
-            # Structure stop: low of breakout candle vs ATR stop
             structural_sl = latest['Low']
             atr_sl = current_price - (1.5 * atr_val)
-            stop_loss = round(max(structural_sl, atr_sl), 2)  # Conservative closer stop
+            stop_loss = round(max(structural_sl, atr_sl), 2)
             target_price = round(current_price + (2.5 * atr_val), 2)
 
             results.append({
@@ -161,14 +176,14 @@ def scan_nifty_market(tickers):
         df_res = df_res.sort_values(by="Score", ascending=False)
     return df_res
 
-if st.button("🚀 Run v2 Weighted Market Scan"):
-    with st.spinner("Executing quantitative scoring model across Nifty blue-chips..."):
-        df_results = scan_nifty_market(nifty_100_watchlist)
+if st.button("🚀 Run Master Market Scan"):
+    with st.spinner(f"Scanning your master list of {len(master_watchlist)} stocks... Please wait a moment."):
+        df_results = scan_master_market(master_watchlist)
         
         if not df_results.empty:
-            st.success(f"Scan complete! Ranked {len(df_results)} stocks by score.")
+            st.success(f"Scan complete! Successfully analyzed and ranked {len(df_results)} stocks.")
             st.dataframe(df_results, use_container_width=True)
         else:
             st.error("Could not fetch market data right now. Please try again.")
 else:
-    st.info("Click the **'Run v2 Weighted Market Scan'** button above to evaluate stocks using multi-factor scoring, session VWAP, and structural risk management.")
+    st.info("Click the **'Run Master Market Scan'** button above to evaluate your entire master universe instantly.")
