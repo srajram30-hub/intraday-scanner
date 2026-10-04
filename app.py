@@ -6,31 +6,31 @@ from datetime import datetime
 import time
 
 # ============================================================
-# INTRADAY PULSE — OPTIMIZED INSTITUTIONAL VERSION
+# INTRADAY PULSE — ELITE SNIPER QUANTITATIVE EDITION
 # ============================================================
 
 st.set_page_config(
-    page_title="Intraday Pulse",
+    page_title="Intraday Pulse Elite",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
 
 # ============================================================
-# OPTIMIZED INSTITUTIONAL PRE-SET PARAMETERS (No setup tools)
+# UNCOMPROMISING INSTITUTIONAL PARAMETERS
 # ============================================================
 
-MIN_SCORE = 60
-STRONG_SCORE = 85
-RVOL_THRESHOLD = 1.50     # Increased to 1.5x for heavier volume filtering
-BREAKOUT_BUFFER = 0.0015  # 0.15%
-MAX_EXTENSION = 2.5       # Tighter extension limit (2.5%)
+MIN_SCORE = 75
+STRONG_SCORE = 88
+RVOL_THRESHOLD = 2.00     # Strict institutional volume multiplier (2x)
+BREAKOUT_BUFFER = 0.0020  # 0.20% clear of resistance to avoid false wicks
+MAX_EXTENSION = 2.0       # Strict anti-chasing extension limit (2%)
 DATA_DAYS = 60
 HOLDING_BARS = 8
-TARGET_R = 2.0
-BACKTEST_SCORE = 85       # Raised to 85 to eliminate low-quality over-trading
-ENTRY_BUFFER = 0.001      # Minor buffer to filter out fake breakouts
-MIN_BARS_BETWEEN_TRADES = 6
+TARGET_R = 2.5            # Higher R:R target to maximize expectancy
+BACKTEST_SCORE = 88       # Elite threshold to eliminate over-trading
+ENTRY_BUFFER = 0.001      # Confirmed breakout entry buffer
+MIN_BARS_BETWEEN_TRADES = 8
 
 MASTER_WATCHLIST = [
     "HFCL.NS", "RBLBANK.NS", "CUB.NS", "SAILIFE.NS", "AEGISLOG.NS",
@@ -139,7 +139,7 @@ def download_nifty(days):
         return pd.DataFrame()
 
 # ============================================================
-# INDICATORS & SCORING
+# STRICT TECHNICAL INDICATORS & SCORING
 # ============================================================
 
 def calculate_indicators(df):
@@ -204,11 +204,12 @@ def calculate_indicators(df):
         df["High"] - df[["Open", "Close"]].max(axis=1)
     ) / candle_range
 
+    # Mandatory strict candle confirmation
     df["StrongCandle"] = (
         (df["Close"] > df["Open"]) &
-        (df["BodyPct"] >= 0.50) &
-        (df["CloseLocation"] >= 0.70) &
-        (df["UpperWickPct"] <= 0.30)
+        (df["BodyPct"] >= 0.55) &
+        (df["CloseLocation"] >= 0.75) &
+        (df["UpperWickPct"] <= 0.25)
     )
 
     df["BarTime"] = df.index.strftime("%H:%M")
@@ -308,113 +309,51 @@ def score_at(df, nifty, i):
     )
     rs = relative_strength_at(df, nifty, i)
 
+    # UNCOMPROMISING FILTER: Disqualify immediately if market is bearish
+    if market_score < 10:
+        return None
+
     score = 0
     reasons = []
     risks = []
 
-    if price > ema:
-        score += 10
-        reasons.append("Above EMA20")
+    # Strict Trend Gate
+    if price > ema and price > vwap:
+        score += 20
+        reasons.append("Strictly above EMA20 & VWAP")
     else:
-        risks.append("Below EMA20")
+        return None  # Disqualify if not above both trend benchmarks
 
-    if price > vwap:
-        score += 10
-        reasons.append("Above VWAP")
-    else:
-        risks.append("Below VWAP")
-
-    if breakout:
-        score += 15
-        reasons.append("20-bar breakout")
-
-        distance = (price / prev_high - 1) * 100
-        if distance >= 0.30:
-            score += 5
-            reasons.append("Strong breakout distance")
-        elif distance >= 0.15:
-            score += 3
-            reasons.append("Confirmed breakout distance")
-
+    # Strict Breakout Gate
+    if breakout and strong_candle:
+        score += 25
+        reasons.append("Clean confirmed breakout with strong candle")
         if fresh:
-            score += 5
-            reasons.append("Fresh breakout")
-        elif breakout_age <= 3:
-            score += 3
-            reasons.append("Recent breakout")
-        elif breakout_age > 6:
-            risks.append("Aging breakout")
+            score += 10
+            reasons.append("Pristine fresh breakout")
     else:
-        risks.append("No confirmed breakout")
+        return None  # Disqualify without a clean breakout + strong candle
 
-    if rvol >= 2.0:
+    # Strict Volume Gate (Must meet 2.0x RVOL)
+    if rvol >= RVOL_THRESHOLD:
+        score += 20
+        reasons.append(f"Institutional RVOL {rvol:.1f}x")
+    else:
+        return None  # Disqualify low volume breakouts
+
+    # Momentum Gate
+    if 55 <= rsi <= 75 and rsi_rising:
         score += 15
-        reasons.append(f"Exceptional RVOL {rvol:.1f}x")
-    elif rvol >= RVOL_THRESHOLD:
-        score += 10
-        reasons.append(f"Strong RVOL {rvol:.1f}x")
-    elif rvol >= 1.0:
-        score += 5
-        reasons.append(f"Normal RVOL {rvol:.1f}x")
+        reasons.append(f"Healthy rising RSI {rsi:.1f}")
     else:
-        risks.append(f"Low RVOL {rvol:.1f}x")
+        return None
 
-    if 55 <= rsi <= 70:
-        score += 8
-        reasons.append(f"Healthy RSI {rsi:.1f}")
-    elif 70 < rsi <= 80:
-        score += 6
-        reasons.append(f"Strong RSI {rsi:.1f}")
-    elif 50 <= rsi < 55:
-        score += 4
-        reasons.append(f"Developing RSI {rsi:.1f}")
-    elif rsi > 80:
-        score += 2
-        risks.append(f"Overheated RSI {rsi:.1f}")
-    else:
-        risks.append(f"Weak RSI {rsi:.1f}")
-
-    if rsi_rising:
-        score += 4
-        reasons.append("RSI rising")
-    else:
-        risks.append("RSI not rising")
-
-    if strong_candle:
-        score += 3
-        reasons.append("Strong candle")
-    else:
-        risks.append("Weak candle")
-
-    if rs >= 1.5:
+    # Relative Strength Gate
+    if rs >= 1.0:
         score += 10
         reasons.append("Strong RS vs NIFTY")
-    elif rs >= 0.75:
-        score += 7
-        reasons.append("Positive RS vs NIFTY")
-    elif rs >= 0.25:
-        score += 4
-        reasons.append("Moderate RS")
     else:
-        risks.append("Weak RS vs NIFTY")
-
-    if market_score >= 10:
-        score += 10
-        reasons.append("Bullish NIFTY")
-    elif market_score >= 5:
-        score += 5
-        reasons.append("Neutral NIFTY")
-    else:
-        risks.append("Bearish NIFTY")
-
-    if extension <= 1.5:
-        score += 5
-        reasons.append("Not extended")
-    elif extension <= MAX_EXTENSION:
-        score += 3
-        reasons.append("Moderately extended")
-    else:
-        risks.append(f"Extended {extension:.1f}% / 5 bars")
+        return None
 
     return {
         "score": int(min(max(score, 0), 100)),
@@ -478,16 +417,7 @@ def run_live_scan(stock_data, nifty):
 
         stop, target, risk = trade_levels(df, i, s["price"], s["atr"])
 
-        if s["extension"] > MAX_EXTENSION:
-            status = "🟠 EXTENDED"
-        elif s["score"] >= STRONG_SCORE and s["breakout"]:
-            status = "🟢 ENTER / CONFIRM"
-        elif s["score"] >= MIN_SCORE and s["breakout"]:
-            status = "🟡 WATCH BREAKOUT"
-        else:
-            status = "🔴 AVOID"
-
-        verdict = "🟢 STRONG SETUP" if (s["score"] >= STRONG_SCORE and s["breakout"]) else "🟡 CONDITIONAL WATCH"
+        verdict = "🟢 ELITE SNIPER SETUP"
         prev_close = float(df["Close"].iloc[-2])
         change = (s["price"] / prev_close - 1) * 100
 
@@ -495,7 +425,7 @@ def run_live_scan(stock_data, nifty):
             "Stock": ticker.replace(".NS", ""),
             "Score": s["score"],
             "Verdict": verdict,
-            "Status": status,
+            "Status": "🟢 ENTER / CONFIRM",
             "Price": round(s["price"], 2),
             "Change %": round(change, 2),
             "Entry": round(s["price"], 2),
@@ -519,7 +449,7 @@ def run_live_scan(stock_data, nifty):
     return out, market_info
 
 # ============================================================
-# BACKTEST ENGINE
+# BACKTEST ENGINE (Elite Rules)
 # ============================================================
 
 def backtest_stock(ticker, raw_df, nifty_raw):
@@ -541,12 +471,6 @@ def backtest_stock(ticker, raw_df, nifty_raw):
             continue
 
         if signal["score"] < BACKTEST_SCORE:
-            continue
-
-        if not signal["breakout"]:
-            continue
-
-        if signal["extension"] > MAX_EXTENSION:
             continue
 
         entry_index = i + 1
@@ -665,7 +589,7 @@ def calculate_backtest_stats(trades):
     losses = int((trades["Outcome"] == "LOSS").sum())
     breakeven = int((trades["Outcome"] == "BREAKEVEN").sum())
 
-    win_rate = wins / total * 100
+    win_rate = wins / total * 100 if total > 0 else 0
     gross_profit = trades.loc[trades["R"] > 0, "R"].sum()
     gross_loss = abs(trades.loc[trades["R"] < 0, "R"].sum())
     profit_factor = gross_profit / gross_loss if gross_loss > 0 else np.inf
@@ -696,18 +620,18 @@ def calculate_backtest_stats(trades):
 # UI INTERFACE
 # ============================================================
 
-st.markdown("# ⚡ Intraday Pulse")
-st.markdown("High-Speed Breakout & Momentum Command Center")
+st.markdown("# ⚡ Intraday Pulse Elite")
+st.markdown("Uncompromising High-Probability Breakout & Momentum Sniper")
 
-scan_tab, backtest_tab = st.tabs(["🚀 Live Scanner", "📈 Backtest"])
+scan_tab, backtest_tab = st.tabs(["🚀 Live Elite Scanner", "📈 Elite Backtest"])
 
 # ============================================================
 # LIVE SCANNER TAB
 # ============================================================
 
 with scan_tab:
-    if st.button("🚀 Run Instant Market Scan", use_container_width=True, type="primary"):
-        with st.spinner(f"Scanning {len(MASTER_WATCHLIST)} stocks with institutional filters..."):
+    if st.button("🚀 Run Elite Sniper Scan", use_container_width=True, type="primary"):
+        with st.spinner(f"Scanning {len(MASTER_WATCHLIST)} stocks with strict institutional filters..."):
             stock_data, errors = download_market_data(tuple(MASTER_WATCHLIST), DATA_DAYS)
             nifty = download_nifty(DATA_DAYS)
             results, market_info = run_live_scan(stock_data, nifty)
@@ -717,7 +641,7 @@ with scan_tab:
         st.session_state["scan_time"] = datetime.now()
 
     if "live_results" not in st.session_state:
-        st.info(f"Tap **Run Instant Market Scan** above to instantly analyze your {len(MASTER_WATCHLIST)}-stock universe.")
+        st.info(f"Tap **Run Elite Sniper Scan** above to scan your universe with strict institutional rules.")
     else:
         results = st.session_state["live_results"]
         market_info = st.session_state["market_info"]
@@ -726,33 +650,36 @@ with scan_tab:
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Scanned", len(MASTER_WATCHLIST))
-        c2.metric("Analyzed", len(results))
-        c3.metric("Strong", int((results["Score"] >= STRONG_SCORE).sum()))
-        c4.metric("Breakouts", int((results["Breakout"] == "YES").sum()))
+        c2.metric("Elite Setups", len(results))
+        c3.metric("Min Score", MIN_SCORE)
+        c4.metric("Target R:R", f"1 : {TARGET_R}")
 
         st.markdown("---")
-        st.subheader("📋 Master Stock Information Table (All Scanned Stocks)")
+        st.subheader("📋 Master Stock Information Table (Elite Filtered)")
         
-        st.dataframe(results, use_container_width=True, hide_index=True)
+        if results.empty:
+            st.warning("No stocks meet the ultra-strict elite sniper criteria right now. Patience is part of the edge!")
+        else:
+            st.dataframe(results, use_container_width=True, hide_index=True)
 
-        st.download_button(
-            "⬇️ Download All Results CSV",
-            results.to_csv(index=False).encode("utf-8"),
-            "intraday_all_stocks_scan.csv",
-            "text/csv",
-            use_container_width=True
-        )
+            st.download_button(
+                "⬇️ Download Elite Results CSV",
+                results.to_csv(index=False).encode("utf-8"),
+                "elite_scan_results.csv",
+                "text/csv",
+                use_container_width=True
+            )
 
 # ============================================================
 # BACKTEST TAB
 # ============================================================
 
 with backtest_tab:
-    st.subheader("📈 Historical Strategy Backtest Engine")
-    st.warning("Backtest simulates strategy performance across historical 15-minute data with optimized institutional filters.")
+    st.subheader("📈 Elite Strategy Backtest Engine")
+    st.warning("Simulating strict institutional rules: 2x RVOL, mandatory bullish market regime, candle structure confirmation, and 2.5R targets.")
 
-    if st.button("📊 Run Historical Backtest", use_container_width=True, type="primary"):
-        with st.spinner("Running historical event-by-event backtest across all stocks..."):
+    if st.button("📊 Run Elite Historical Backtest", use_container_width=True, type="primary"):
+        with st.spinner("Running strict event-by-event backtest across all stocks..."):
             trades, errors = run_full_backtest(tuple(MASTER_WATCHLIST), DATA_DAYS)
 
         st.session_state["backtest_trades"] = trades
@@ -760,16 +687,16 @@ with backtest_tab:
         st.session_state["backtest_time"] = datetime.now()
 
     if "backtest_trades" not in st.session_state:
-        st.info("Tap **Run Historical Backtest** above to measure win rates, expectancy, and profit factor.")
+        st.info("Tap **Run Elite Historical Backtest** above to measure true strict-rule performance.")
     else:
         trades = st.session_state["backtest_trades"]
 
         if trades.empty:
-            st.error("No historical trades matched the current institutional rules.")
+            st.error("No historical trades met the ultra-strict rules. Try adjusting historical window or check market conditions.")
         else:
             stats = calculate_backtest_stats(trades)
 
-            st.subheader("🎯 Backtest Performance Metrics")
+            st.subheader("🎯 Elite Backtest Performance Metrics")
             bc1, bc2, bc3, bc4 = st.columns(4)
             bc1.metric("Win Rate", f"{stats['Win Rate %']:.1f}%")
             bc2.metric("Total Trades", stats["Trades"])
@@ -786,13 +713,13 @@ with backtest_tab:
             equity = trades["R"].cumsum()
             st.line_chart(pd.DataFrame({"Cumulative R": equity.values}))
 
-            st.subheader("📒 Complete Backtest Trade Log")
+            st.subheader("📒 Complete Elite Trade Log")
             st.dataframe(trades, use_container_width=True, hide_index=True)
 
             st.download_button(
-                "⬇️ Download Trade Log CSV",
+                "⬇️ Download Elite Trade Log CSV",
                 trades.to_csv(index=False).encode("utf-8"),
-                "backtest_trade_log.csv",
+                "elite_backtest_trade_log.csv",
                 "text/csv",
                 use_container_width=True
             )
