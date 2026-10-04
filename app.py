@@ -101,7 +101,7 @@ def download_market_data(tickers, days):
     for start in range(0, len(tickers), chunk_size):
         chunk = list(tickers[start:start + chunk_size])
         try:
-            data = yf.download(chunk, period=f"{days}d", interval="30m", auto_adjust=True,
+            data = yf.download(chunk, period=f"{days}d", interval="60m", auto_adjust=True,
                                progress=False, group_by="ticker", threads=True)
             if data.empty:
                 errors.extend(chunk)
