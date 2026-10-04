@@ -21,7 +21,8 @@ def scan_nifty_market(tickers):
     results = []
     for ticker in tickers:
         try:
-            df = yf.download(ticker, period="5d", interval="15p", progress=False)
+            # FIXED: changed 15p to valid 15m interval
+            df = yf.download(ticker, period="5d", interval="15m", progress=False)
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
             if df.empty or len(df) < 25:
