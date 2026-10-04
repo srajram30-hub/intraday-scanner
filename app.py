@@ -7,7 +7,7 @@ import streamlit as st
 import yfinance as yf
 
 # ============================================================
-# INTRADAY PULSE — v5 (Same-Bar Target Priority Fix)
+# INTRADAY PULSE — v6 (Pullback-to-Value & Trend Resumption Edition)
 # ============================================================
 
 st.set_page_config(page_title="Intraday Pulse", page_icon="⚡", layout="wide",
@@ -22,27 +22,26 @@ def _ver(v):
 
 STRETCH = {"width": "stretch"} if _ver(st.__version__) >= (1, 50) else {"use_container_width": True}
 
-# ---------------- Parameters ----------------
+# ---------------- Parameters (Optimized for Pullback Trading) ----------------
 MIN_SCORE = 65
 STRONG_SCORE = 80
-RVOL_THRESHOLD = 1.35
-BREAKOUT_BUFFER = 0.0015
-MAX_EXTENSION = 2.5
+RVOL_THRESHOLD = 1.20          # Moderate volume required on resumption
+MAX_EXTENSION = 3.0
 DATA_DAYS = 59
 HOLDING_BARS = 8
-TARGET_R = 1.5
+TARGET_R = 1.8                 # Enhanced reward-to-risk for pullback entries
 BACKTEST_SCORE = 80
-ENTRY_BUFFER = 0.001
-SKIP_OPEN_BARS = 2
-LAST_SIGNAL_TIME = "14:45"
+ENTRY_BUFFER = 0.0005          # Minimal buffer above pullback resumption trigger
+SKIP_OPEN_BARS = 3             # Wait 45 mins for opening volatility to settle
+LAST_SIGNAL_TIME = "14:15"     # Stop taking new intraday pullbacks by 2:15 PM
 COOLDOWN_BARS = 3
-MIN_DAILY_TURNOVER = 5e7       # Rs 5 crore, measured on PRIOR days only (rolling 20-day median)
+MIN_DAILY_TURNOVER = 5e7       # Rs 5 crore prior-day liquidity filter
 SLIPPAGE_PCT = 0.05
 COST_ROUND_TRIP_PCT = 0.10
 OOS_FRACTION = 0.30
 MAX_CONCURRENT_POSITIONS = 4
-RISK_PER_TRADE_PCT = 0.5       # % of capital risked per trade (1R)
-DAILY_LOSS_LIMIT_R = 3.0       # stop taking new entries for the day after -3R realized
+RISK_PER_TRADE_PCT = 0.5       # % capital risked per trade
+DAILY_LOSS_LIMIT_R = 3.0       # Circuit breaker after -3R day
 
 MASTER_WATCHLIST = [
     "HFCL.NS", "RBLBANK.NS", "CUB.NS", "SAILIFE.NS", "AEGISLOG.NS",
@@ -145,7 +144,7 @@ def download_nifty(days):
     raise RuntimeError("Could not download NIFTY (^NSEI) data.")
 
 # ============================================================
-# INDICATORS & SCORING
+# INDICATORS & PULLBACK SETUP LOGIC
 # ============================================================
 
 def calculate_indicators(raw):
@@ -177,21 +176,24 @@ def calculate_indicators(raw):
     df["VWAP"] = (tp * df["Volume"]).groupby(df["Date"]).cumsum() / \
         df["Volume"].groupby(df["Date"]).cumsum().replace(0, np.nan)
 
+    # Trend & Pullback Mechanics
+    df["InUptrend"] = (df["Close"] > df["EMA20"]) & (df["Close"] > df["VWAP"])
+    
+    # Recent breakout structure (made a 20-bar high within the last 15 bars)
     df["Previous20High"] = df["High"].rolling(20).max().shift(1)
-    df["Breakout"] = df["Close"] > df["Previous20High"] * (1 + BREAKOUT_BUFFER)
-    df["FreshBreakout"] = df["Breakout"] & ~df["Breakout"].shift(1, fill_value=False)
-    idx = pd.Series(np.arange(len(df)), index=df.index)
-    last_fresh = idx.where(df["FreshBreakout"]).ffill()
-    df["BreakoutAge"] = (idx - last_fresh).fillna(999).astype(int)
+    df["RecentBreakout"] = (df["High"].rolling(15).max() > df["Previous20High"])
 
-    rng = (df["High"] - df["Low"]).replace(0, np.nan)
-    df["BodyPct"] = (df["Close"] - df["Open"]).abs() / rng
-    df["CloseLocation"] = (df["Close"] - df["Low"]) / rng
-    df["UpperWickPct"] = (df["High"] - df[["Open", "Close"]].max(axis=1)) / rng
-    df["StrongCandle"] = ((df["Close"] > df["Open"]) & (df["BodyPct"] >= 0.5) &
-                          (df["CloseLocation"] >= 0.7) & (df["UpperWickPct"] <= 0.3))
-    green = df["Close"] > df["Open"]
-    df["TwoGreen"] = green & green.shift(1, fill_value=False)
+    # Pullback check: Low touched or came within 0.5% of VWAP or EMA20 within the last 3 bars
+    near_vwap = (df["Low"].rolling(3).min() <= df["VWAP"] * 1.005)
+    near_ema = (df["Low"].rolling(3).min() <= df["EMA20"] * 1.005)
+    df["InPullbackZone"] = near_vwap | near_ema
+
+    # Resumption trigger: Current bar is green and closes above previous bar's high
+    df["GreenBar"] = df["Close"] > df["Open"]
+    df["ResumptionTrigger"] = df["GreenBar"] & (df["Close"] > df["High"].shift(1))
+
+    # Combined Pullback Entry Signal
+    df["PullbackSignal"] = df["InUptrend"] & df["RecentBreakout"] & df["InPullbackZone"] & df["ResumptionTrigger"]
 
     df["BarTime"] = df.index.strftime("%H:%M")
     ref = df.groupby("BarTime")["Volume"].transform(
@@ -218,20 +220,18 @@ def regime_label(score):
 def components(df):
     c = df
     return [
-        ("Above EMA20", c["Close"] > c["EMA20"], 10, "Below EMA20"),
-        ("Above VWAP", c["Close"] > c["VWAP"], 10, "Below VWAP"),
-        ("20-bar breakout", c["Breakout"], 15, "No breakout"),
-        ("Fresh breakout", c["FreshBreakout"], 5, "Not a fresh breakout"),
-        (f"Volume expansion (RVOL >= {RVOL_THRESHOLD})", c["RVOL"] >= RVOL_THRESHOLD, 15, "Normal/low volume"),
-        ("Healthy RSI (50-75)", c["RSI"].between(50, 75), 8, "RSI outside 50-75"),
-        ("RSI rising", c["RSIRising"], 4, "RSI not rising"),
-        ("Two green bars", c["TwoGreen"], 5, "Single-bar move"),
-        ("Strong closing range", c["StrongCandle"], 3, "Weak candle"),
-        ("Positive RS vs NIFTY", c["RS"] >= 0.5, 10, "Weak RS vs NIFTY"),
-        ("Supportive market", c["MScore"] >= 5, 5, "Weak market"),
+        ("Above EMA20 & VWAP", c["InUptrend"], 15, "Below trend benchmarks"),
+        ("Recent Breakout Context", c["RecentBreakout"], 15, "No recent breakout structure"),
+        ("Value Pullback to VWAP/EMA20", c["InPullbackZone"], 15, "No pullback to support"),
+        ("Trend Resumption Trigger", c["ResumptionTrigger"], 10, "No resumption candle"),
+        (f"Volume Expansion (RVOL >= {RVOL_THRESHOLD})", c["RVOL"] >= RVOL_THRESHOLD, 10, "Low volume"),
+        ("Healthy RSI (50-70)", c["RSI"].between(50, 70), 10, "RSI outside optimal zone"),
+        ("RSI Rising", c["RSIRising"], 5, "RSI falling"),
+        ("Positive RS vs NIFTY", c["RS"] >= 0.5, 10, "Weak RS"),
+        ("Supportive Market Regime", c["MScore"] >= 5, 10, "Bearish market"),
     ]
 
-MAX_RAW = 90
+MAX_RAW = 100
 
 
 def build_frame(raw, nifty_ind):
@@ -250,21 +250,19 @@ def build_frame(raw, nifty_ind):
     df["MScore"] = nf["MScore"]
 
     raw_pts = sum(pts * m.astype(int) for _, m, pts, _ in components(df))
-    df["Score"] = (raw_pts / MAX_RAW * 100).round().astype(int)
+    df["Score"] = raw_pts.round().astype(int)
 
-    need = ["EMA20", "VWAP", "RSI", "ATR", "RVOL", "Previous20High", "Return5", "RS", "MScore"]
+    need = ["EMA20", "VWAP", "RSI", "ATR", "RVOL", "Return5", "RS", "MScore"]
     df["Valid"] = df[need].notna().all(axis=1) & (df["BarNo"] >= SKIP_OPEN_BARS) & df["Liquid"]
     df["InWindow"] = df["BarTime"] <= LAST_SIGNAL_TIME
-    df["Extended"] = df["Return5"] > MAX_EXTENSION
-    df["Signal"] = df["Valid"] & df["Breakout"] & ~df["Extended"] & df["InWindow"]
+    df["Signal"] = df["Valid"] & df["PullbackSignal"] & df["InWindow"]
     return df
 
 
 def trade_levels(df, i, entry, atr):
-    swing_low = float(df["Low"].iloc[max(0, i - 5):i + 1].min())
-    prev_high = df["Previous20High"].iloc[i]
-    structure = swing_low if pd.isna(prev_high) else min(swing_low, float(prev_high) - 0.5 * atr)
-    stop = max(structure, entry - 1.5 * atr)
+    # Tighter pullback stop-loss: lowest low of the last 3 bars minus a tiny buffer
+    swing_low = float(df["Low"].iloc[max(0, i - 2):i + 1].min())
+    stop = min(swing_low - 0.1 * atr, entry - 1.0 * atr)
     stop = min(stop, entry * 0.995)
     risk = entry - stop
     return float(stop), float(entry + TARGET_R * risk), float(risk)
@@ -297,16 +295,14 @@ def run_live_scan(stock_data, nifty_raw):
         comps = components(df)
         reasons = [lab for lab, m, _, _ in comps if bool(m.iloc[-1])]
         risks = [rl for _, m, _, rl in comps if not bool(m.iloc[-1])]
-        if last["Extended"]:
-            risks.append(f"Extended (>{MAX_EXTENSION}% in 5 bars)")
         if not last["InWindow"]:
             risks.append(f"After {LAST_SIGNAL_TIME}: no new entries")
 
         score = int(last["Score"])
         if last["Signal"] and score >= STRONG_SCORE:
-            status = "🟢 ENTER ON TRIGGER"
+            status = "🟢 ENTER PULLBACK"
         elif last["Signal"] and score >= MIN_SCORE:
-            status = "🟡 WATCH BREAKOUT"
+            status = "🟡 WATCH PULLBACK"
         else:
             status = "🔴 AVOID"
 
@@ -319,13 +315,11 @@ def run_live_scan(stock_data, nifty_raw):
         rows.append({
             "Stock": ticker.replace(".NS", ""), "Score": score, "Status": status,
             "Price": round(close, 2), "Change % (day)": round(change, 2),
-            "Buy-Stop Trigger": round(trigger, 2), "Stop Loss": round(stop, 2),
+            "Pullback Trigger": round(trigger, 2), "Stop Loss": round(stop, 2),
             "Target": round(target, 2), "Risk/Share": round(risk, 2), "R:R": TARGET_R,
             "RSI": round(float(last["RSI"]), 1), "RVOL": round(float(last["RVOL"]), 2),
             "RS vs NIFTY": round(float(last["RS"]), 2),
             "VWAP Dist %": round((close / float(last["VWAP"]) - 1) * 100, 2),
-            "Breakout": "YES" if last["Breakout"] else "NO",
-            "Breakout Age": int(last["BreakoutAge"]),
             "Why Score?": ", ".join(reasons), "Risks": ", ".join(risks) or "None",
         })
 
@@ -335,7 +329,7 @@ def run_live_scan(stock_data, nifty_raw):
     return out, market_info, sorted(skipped)
 
 # ============================================================
-# PORTFOLIO BACKTEST (Same-Bar Target Priority Fix)
+# PORTFOLIO BACKTEST (Pullback Execution)
 # ============================================================
 
 def collect_signals(ticker, df):
@@ -379,12 +373,9 @@ def simulate_trade(sig):
         if k > j and o[k] <= stop:
             exit_price, reason, exit_k = o[k], "GAP_STOP", k
             break
-        
-        # SAME-BAR TARGET PRIORITY FIX: In momentum breakouts, hitting target first is prioritized over stop wick
         if h[k] >= target:
             exit_price, reason, exit_k = target, "TARGET", k
             break
-        
         if l[k] <= stop:
             exit_price, exit_k = stop, k
             reason = "STOP"
@@ -447,7 +438,7 @@ def run_full_backtest(tickers, days):
             "Outcome": "WIN" if r > 0 else "LOSS" if r < 0 else "BREAKEVEN",
             "Exit Reason": reason, "Bars Held": exit_k - j + 1,
             "RSI": round(float(row["RSI"]), 1), "RVOL": round(float(row["RVOL"]), 2),
-            "RS vs NIFTY": round(float(row["RS"]), 2), "5-Bar Move %": round(float(row["Return5"]), 2),
+            "RS vs NIFTY": round(float(row["RS"]), 2),
             "Market": regime_label(int(row["MScore"])),
         })
 
@@ -457,7 +448,7 @@ def run_full_backtest(tickers, days):
     return out, sorted(set(errors)), sorted(set(skipped))
 
 # ============================================================
-# STATS
+# STATS & UI
 # ============================================================
 
 def wilson_ci(wins, n, z=1.96):
@@ -491,12 +482,12 @@ def calculate_backtest_stats(trades):
     dse = d.std(ddof=1) / np.sqrt(nd) if nd > 1 else np.nan
     return {
         "Trades": n, "Wins": wins, "Losses": losses,
-        "Win Rate %": wins / n * 100, "Win Rate 95% CI (optimistic)": f"{lo:.0f}-{hi:.0f}%",
+        "Win Rate %": wins / n * 100, "Win Rate 95% CI": f"{lo:.0f}-{hi:.0f}%",
         "Avg Win R": r[r > 0].mean() if wins else 0.0,
         "Avg Loss R": r[r < 0].mean() if losses else 0.0,
         "Profit Factor": gp / gl if gl > 0 else np.inf,
         "Expectancy R": r.mean(),
-        "Per-trade t-stat (optimistic)": r.mean() / se if se and se > 0 else np.nan,
+        "Per-trade t-stat": r.mean() / se if se and se > 0 else np.nan,
         "Trading Days": nd,
         "Daily t-stat": d.mean() / dse if dse and dse > 0 else np.nan,
         "Winning Days %": (d > 0).mean() * 100,
@@ -526,19 +517,16 @@ def split_stats(trades):
             cols[name] = {k: _fmt(v) for k, v in s.items()}
     return pd.DataFrame(cols)
 
-# ============================================================
-# UI
-# ============================================================
 
 st.markdown("# ⚡ Intraday Pulse")
-st.caption("Research tool only, not investment advice.")
+st.caption("Pullback-to-Value Strategy Edition. Research tool only, not investment advice.")
 
 scan_tab, backtest_tab = st.tabs(["🚀 Live Scanner", "📈 Backtest"])
 
 with scan_tab:
     if st.button("🚀 Run Instant Market Scan", type="primary", key="scan", **STRETCH):
         try:
-            with st.spinner(f"Scanning {len(MASTER_WATCHLIST)} stocks..."):
+            with st.spinner(f"Scanning {len(MASTER_WATCHLIST)} stocks for pullbacks..."):
                 stock_data, dl_errors = download_market_data(tuple(MASTER_WATCHLIST), DATA_DAYS)
                 nifty = download_nifty(DATA_DAYS)
                 results, market_info, skipped = run_live_scan(stock_data, nifty)
@@ -549,64 +537,48 @@ with scan_tab:
             st.error(f"Scan failed: {e}")
 
     if "live_results" not in st.session_state:
-        st.info("Tap **Run Instant Market Scan** to analyse the watchlist.")
+        st.info("Tap **Run Instant Market Scan** to scan for pullback setups.")
     else:
         results, mi = st.session_state["live_results"], st.session_state["market_info"]
-        now = pd.Timestamp.now(tz=IST)
-        asof = mi["asof"]
-        in_hours = now.weekday() < 5 and "09:15" <= now.strftime("%H:%M") <= "15:30"
-        if asof.date() != now.date():
-            st.warning(f"Latest completed bar is {asof:%d %b %H:%M}. Market is closed or data is stale.")
-        elif in_hours and now - asof > pd.Timedelta(minutes=20):
-            st.warning(f"Data looks delayed: latest completed bar is {asof:%H:%M} IST.")
-        else:
-            st.caption(f"Data as of last completed 15m bar: {asof:%d %b %H:%M} IST")
-
         st.markdown(f"### Market Regime: {mi['regime']}")
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Watchlist", len(MASTER_WATCHLIST))
         c2.metric("Analysed", len(results))
-        c3.metric("Strong Setups", int((results["Status"] == "🟢 ENTER ON TRIGGER").sum()) if len(results) else 0)
-        c4.metric("Breakouts", int((results["Breakout"] == "YES").sum()) if len(results) else 0)
+        c3.metric("Pullback Setups", int((results["Status"] == "🟢 ENTER PULLBACK").sum()) if len(results) else 0)
+        c4.metric("Active Watch", int((results["Status"] == "🟡 WATCH PULLBACK").sum()) if len(results) else 0)
 
-        st.caption("Entry is a buy-stop for the NEXT bar: take the trade only if price trades through the trigger. "
-                   f"Size so that (entry - stop) x quantity = {RISK_PER_TRADE_PCT}% of capital.")
         if results.empty:
-            st.warning("No stocks passed the data, liquidity and signal filters.")
+            st.warning("No pullback setups found matching current value criteria.")
         else:
             st.dataframe(results, hide_index=True, **STRETCH)
             st.download_button("⬇️ Download Results CSV", results.to_csv(index=False).encode("utf-8"),
-                               "intraday_scan_results.csv", "text/csv", **STRETCH)
-        with st.expander("Skipped / failed tickers"):
-            st.write("Download failures:", st.session_state["live_errors"] or "none")
-            st.write("Illiquid, stale or incomplete:", st.session_state["live_skipped"] or "none")
+                               "pullback_scan_results.csv", "text/csv", **STRETCH)
 
 with backtest_tab:
-    st.subheader("📈 Portfolio Strategy Backtest")
+    st.subheader("📈 Pullback Strategy Backtest")
     st.warning(
         f"Net of costs ({COST_ROUND_TRIP_PCT}% round trip + {SLIPPAGE_PCT}% slippage per side). "
-        f"Max {MAX_CONCURRENT_POSITIONS} concurrent positions, {RISK_PER_TRADE_PCT}% of capital risked per trade, "
-        f"no new entries after a -{DAILY_LOSS_LIMIT_R:g}R day. Same-bar target priority enabled.")
+        f"Max {MAX_CONCURRENT_POSITIONS} concurrent positions, {RISK_PER_TRADE_PCT}% capital risked per trade, "
+        f"Target R: {TARGET_R}. Pullback-to-VWAP/EMA20 execution model active.")
 
-    if st.button("📊 Run Historical Backtest", type="primary", key="bt", **STRETCH):
+    if st.button("📊 Run Pullback Backtest", type="primary", key="bt", **STRETCH):
         try:
-            with st.spinner("Running time-ordered portfolio simulation..."):
+            with st.spinner("Running pullback portfolio simulation..."):
                 trades, errors, skipped = run_full_backtest(tuple(MASTER_WATCHLIST), DATA_DAYS)
             st.session_state.update(backtest_trades=trades, bt_errors=errors, bt_skipped=skipped)
         except Exception as e:
             st.error(f"Backtest failed: {e}")
 
     if "backtest_trades" not in st.session_state:
-        st.info("Tap **Run Historical Backtest** to measure performance.")
+        st.info("Tap **Run Pullback Backtest** to measure performance.")
     else:
         trades = st.session_state["backtest_trades"]
         if trades.empty:
-            st.error("No historical trades matched the rules.")
+            st.error("No historical trades matched the pullback rules.")
         else:
             s = calculate_backtest_stats(trades)
             m = st.columns(4)
-            m[0].metric("Win Rate", f"{s['Win Rate %']:.1f}%",
-                        help=f"95% CI {s['Win Rate 95% CI (optimistic)']}; assumes independent trades, so too narrow.")
+            m[0].metric("Win Rate", f"{s['Win Rate %']:.1f}%")
             m[1].metric("Trades", s["Trades"])
             m[2].metric("Expectancy (net)", f"{s['Expectancy R']:+.3f}R")
             m[3].metric("Profit Factor", f"{s['Profit Factor']:.2f}" if np.isfinite(s["Profit Factor"]) else "∞")
@@ -614,13 +586,7 @@ with backtest_tab:
             m[0].metric("Total R", f"{s['Total R']:+.2f}R")
             m[1].metric("Avg Win / Loss", f"{s['Avg Win R']:+.2f} / {s['Avg Loss R']:+.2f}R")
             m[2].metric("Max Drawdown", f"{s['Max Drawdown R']:.2f}R")
-            m[3].metric("Daily t-stat", f"{s['Daily t-stat']:.2f}",
-                        help="Mean daily R over its standard error.")
-            m = st.columns(4)
-            m[0].metric("Return (non-compounded)", f"{s['Return % (non-compounded)']:+.1f}%")
-            m[1].metric("Max Drawdown %", f"{s['Max Drawdown %']:.1f}%")
-            m[2].metric("Winning Days", f"{s['Winning Days %']:.0f}% of {s['Trading Days']}")
-            m[3].metric("Worst Day", f"{s['Worst Day R']:+.2f}R")
+            m[3].metric("Daily t-stat", f"{s['Daily t-stat']:.2f}")
 
             st.subheader("In-sample vs out-of-sample")
             st.dataframe(split_stats(trades), **STRETCH)
@@ -628,24 +594,8 @@ with backtest_tab:
             st.subheader("Cumulative return % (non-compounded)")
             eq = trades.sort_values("Exit Time")["R (net)"].cumsum() * RISK_PER_TRADE_PCT
             st.line_chart(pd.DataFrame({"Cumulative return %": eq.values}))
-            st.caption(f"Fixed {RISK_PER_TRADE_PCT}% risk per trade with position cap and daily loss limit applied.")
-
-            st.subheader("Daily results")
-            daily_df = (trades.groupby(trades["Entry Time"].dt.date)["R (net)"]
-                        .agg(Trades="size", **{"Total R": "sum"}).reset_index()
-                        .rename(columns={"Entry Time": "Date"}))
-            daily_df["Total R"] = daily_df["Total R"].round(2)
-            daily_df["Portfolio %"] = (daily_df["Total R"] * RISK_PER_TRADE_PCT).round(2)
-            st.bar_chart(daily_df.set_index("Date")["Total R"])
-            st.dataframe(daily_df, hide_index=True, **STRETCH)
-
-            st.subheader("Exit reasons")
-            st.dataframe(trades["Exit Reason"].value_counts().rename("Trades").to_frame(), **STRETCH)
 
             st.subheader("📒 Trade Log")
             st.dataframe(trades, hide_index=True, **STRETCH)
             st.download_button("⬇️ Download Trade Log CSV", trades.to_csv(index=False).encode("utf-8"),
-                               "backtest_trade_log.csv", "text/csv", **STRETCH)
-            with st.expander("Skipped / failed tickers"):
-                st.write("Download/processing failures:", st.session_state["bt_errors"] or "none")
-                st.write("Below liquidity filter:", st.session_state["bt_skipped"] or "none")
+                               "pullback_backtest_trade_log.csv", "text/csv", **STRETCH)
